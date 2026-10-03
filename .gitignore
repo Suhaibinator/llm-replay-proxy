@@ -1,0 +1,12 @@
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+/bin/
+/config.local.json
+/web/node_modules/
+/web/.next/
+/web/tsconfig.tsbuildinfo
+/tests/browser/node_modules/
+/tests/browser/test-results/
+/tests/browser/playwright-report/
