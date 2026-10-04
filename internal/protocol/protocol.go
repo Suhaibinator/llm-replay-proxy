@@ -46,7 +46,7 @@ func Validate(route string, streaming bool, revision model.Revision) error {
 				return fmt.Errorf("event %d has an invalid offset", i)
 			}
 			last = event.OffsetMS
-			if _, err := parseFrame(event.Data); err != nil {
+			if _, err := parseEventFrame(i, event.Data); err != nil {
 				return fmt.Errorf("event %d: %w", i, err)
 			}
 		}
@@ -120,6 +120,29 @@ func EditText(route string, streaming bool, revision model.Revision, text string
 
 type frame struct{ event, data string }
 
+// utf8BOM may prefix the first frame of an event stream; the SSE specification
+// strips it before parsing.
+const utf8BOM = "\ufeff"
+
+// splitField splits an SSE line into its field name and value. A line without
+// a colon names a field whose value is empty, and one leading space after the
+// colon is not part of the value.
+func splitField(line string) (string, string) {
+	name, value, found := strings.Cut(line, ":")
+	if !found {
+		return line, ""
+	}
+	return name, strings.TrimPrefix(value, " ")
+}
+
+// parseEventFrame parses the frame at position index of a recorded stream.
+func parseEventFrame(index int, raw string) (frame, error) {
+	if index == 0 {
+		raw = strings.TrimPrefix(raw, utf8BOM)
+	}
+	return parseFrame(raw)
+}
+
 func parseFrame(raw string) (frame, error) {
 	if !(strings.HasSuffix(raw, "\n\n") || strings.HasSuffix(raw, "\r\n\r\n")) {
 		return frame{}, errors.New("SSE frame is missing its blank-line delimiter")
@@ -132,20 +155,22 @@ func parseFrame(raw string) (frame, error) {
 	lines := strings.Split(payload, "\n")
 	f := frame{}
 	var data []string
+	sawEvent := false
 	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "event:"):
-			if f.event != "" {
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		name, value := splitField(line)
+		switch name {
+		case "event":
+			if sawEvent {
 				return frame{}, errors.New("SSE frame has multiple event fields")
 			}
-			f.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		case strings.HasPrefix(line, "data:"):
-			v := strings.TrimPrefix(line, "data:")
-			if strings.HasPrefix(v, " ") {
-				v = v[1:]
-			}
-			data = append(data, v)
-		case line == "" || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "id:") || strings.HasPrefix(line, "retry:"):
+			sawEvent = true
+			f.event = strings.TrimSpace(value)
+		case "data":
+			data = append(data, value)
+		case "id", "retry":
 		default:
 			return frame{}, fmt.Errorf("malformed SSE field %q", line)
 		}
@@ -162,6 +187,10 @@ func replaceFrameData(raw string, value any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	bom := ""
+	if strings.HasPrefix(raw, utf8BOM) {
+		bom, raw = utf8BOM, strings.TrimPrefix(raw, utf8BOM)
+	}
 	newline := "\n"
 	if strings.Contains(raw, "\r\n") {
 		newline = "\r\n"
@@ -170,7 +199,7 @@ func replaceFrameData(raw string, value any) (string, error) {
 	out := make([]string, 0, len(lines))
 	replaced := false
 	for _, line := range lines {
-		if strings.HasPrefix(line, "data:") {
+		if name, _ := splitField(line); name == "data" {
 			if !replaced {
 				out = append(out, "data: "+string(b))
 				replaced = true
@@ -182,7 +211,7 @@ func replaceFrameData(raw string, value any) (string, error) {
 	if !replaced {
 		return "", errors.New("SSE frame has no data field")
 	}
-	return strings.Join(out, newline) + newline + newline, nil
+	return bom + strings.Join(out, newline) + newline + newline, nil
 }
 
 func decodeObject(s string) (map[string]any, error) {
@@ -223,7 +252,7 @@ func eventObjects(rev model.Revision) ([]frame, []map[string]any, error) {
 	frames := make([]frame, len(rev.Events))
 	objects := make([]map[string]any, len(rev.Events))
 	for i, event := range rev.Events {
-		f, err := parseFrame(event.Data)
+		f, err := parseEventFrame(i, event.Data)
 		if err != nil {
 			return nil, nil, fmt.Errorf("event %d: %w", i, err)
 		}
@@ -267,6 +296,32 @@ func asString(v any) (string, bool)      { x, ok := v.(string); return x, ok }
 func nonempty(v any) bool                { return v != nil && fmt.Sprint(v) != "" && fmt.Sprint(v) != "<nil>" }
 func unsupported(kind string) string {
 	return "Plain-text editing is unavailable because this recording contains " + kind + ". Use the advanced event editor."
+}
+
+// annotatedText describes metadata whose character offsets or tokens are tied
+// to the recorded text, so replacing the text would leave them stale.
+const annotatedText = "annotations, citations, or logprobs tied to the text"
+
+// hasEntries reports whether a JSON value carries any information: null,
+// empty strings, arrays and objects (recursively) do not.
+func hasEntries(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return false
+	case string:
+		return x != ""
+	case []any:
+		return len(x) > 0
+	case map[string]any:
+		for _, e := range x {
+			if hasEntries(e) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
 }
 
 func inspectChat(stream bool, rev model.Revision, classify bool) (string, string, error) {
@@ -328,15 +383,22 @@ func inspectChat(stream bool, rev model.Revision, classify bool) (string, string
 		if classify && m["refusal"] != nil {
 			return "", unsupported("a refusal"), nil
 		}
+		if classify && m["audio"] != nil {
+			return "", unsupported("audio output"), nil
+		}
+		if classify && (hasEntries(m["annotations"]) || hasEntries(c["logprobs"])) {
+			return "", unsupported(annotatedText), nil
+		}
+		// A response truncated by the token limit may carry no content at all.
+		if m["content"] == nil && c["finish_reason"] == "length" {
+			return "", "", nil
+		}
 		s, ok := asString(m["content"])
 		if !ok {
 			if classify {
-				if m["refusal"] != nil {
-					return "", unsupported("a refusal"), nil
-				}
 				return "", unsupported("non-text or multimodal content"), nil
 			}
-			if m["tool_calls"] != nil || m["function_call"] != nil || m["refusal"] != nil {
+			if m["tool_calls"] != nil || m["function_call"] != nil || m["refusal"] != nil || m["audio"] != nil {
 				return "", "", nil
 			}
 			if _, ok := asSlice(m["content"]); ok {
@@ -400,6 +462,12 @@ func inspectChat(stream bool, rev model.Revision, classify bool) (string, string
 			}
 			if classify && (d["tool_calls"] != nil || d["function_call"] != nil || d["reasoning"] != nil || d["reasoning_content"] != nil || d["reasoning_details"] != nil) {
 				return "", unsupported("tool calls or reasoning"), nil
+			}
+			if classify && d["audio"] != nil {
+				return "", unsupported("audio output"), nil
+			}
+			if classify && (hasEntries(d["annotations"]) || hasEntries(c["logprobs"])) {
+				return "", unsupported(annotatedText), nil
 			}
 			if content, exists := d["content"]; exists && content != nil {
 				s, ok := asString(content)
@@ -471,6 +539,9 @@ func responseOutputText(response map[string]any, classify bool) (string, string,
 				continue
 			}
 			textParts++
+			if classify && (hasEntries(c["annotations"]) || hasEntries(c["logprobs"])) {
+				return "", unsupported(annotatedText), nil
+			}
 			s, ok := asString(c["text"])
 			if !ok {
 				return "", "", errors.New("output_text text is missing")
@@ -503,7 +574,8 @@ func inspectResponses(stream bool, rev model.Revision, classify bool) (string, s
 	var outputDoneText strings.Builder
 	var partDoneText strings.Builder
 	var final string
-	completed := false
+	completed, annotated := false, false
+	textDeltas := 0
 	for i, o := range objs {
 		if frames[i].data == "[DONE]" {
 			continue
@@ -518,8 +590,13 @@ func inspectResponses(stream bool, rev model.Revision, classify bool) (string, s
 		if typ == "error" || typ == "response.failed" || typ == "response.incomplete" {
 			return "", "", fmt.Errorf("event %d reports %s", i, typ)
 		}
+		if part, _ := asMap(o["part"]); strings.HasSuffix(typ, ".annotation.added") || hasEntries(o["logprobs"]) ||
+			hasEntries(part["annotations"]) || hasEntries(part["logprobs"]) {
+			annotated = true
+		}
 		switch typ {
 		case "response.output_text.delta":
+			textDeltas++
 			if _, ok := asString(o["item_id"]); !ok {
 				return "", "", fmt.Errorf("event %d has no item identity", i)
 			}
@@ -571,6 +648,13 @@ func inspectResponses(stream bool, rev model.Revision, classify bool) (string, s
 	if b.String() != final {
 		return "", "", fmt.Errorf("response text deltas %q do not agree with final output %q", b.String(), final)
 	}
+	if classify && annotated {
+		return "", unsupported(annotatedText), nil
+	}
+	if classify && textDeltas == 0 {
+		// The plain editor rewrites text deltas; it never inserts events.
+		return "", "Plain-text editing is unavailable because this recording streams no output_text.delta event to rewrite. Use the advanced event editor.", nil
+	}
 	return final, "", nil
 }
 
@@ -599,6 +683,9 @@ func messageText(o map[string]any, classify bool) (string, string, error) {
 			continue
 		}
 		textBlocks++
+		if classify && hasEntries(c["citations"]) {
+			return "", unsupported(annotatedText), nil
+		}
 		s, ok := asString(c["text"])
 		if !ok {
 			return "", "", errors.New("Anthropic text is missing")
@@ -655,6 +742,9 @@ func inspectMessages(stream bool, rev model.Revision, classify bool) (string, st
 				}
 			} else {
 				textBlocks++
+				if classify && hasEntries(block["citations"]) {
+					return "", unsupported(annotatedText), nil
+				}
 				s, ok := asString(block["text"])
 				if !ok {
 					return "", "", errors.New("text block has no text")
@@ -744,31 +834,55 @@ func editChat(r *model.Revision, stream bool, text string) error {
 	if e != nil {
 		return e
 	}
-	written := false
-	for i, o := range objs {
-		if o == nil {
-			continue
+	// The replacement goes into the first content delta of the (single) choice,
+	// or, when the stream never sent a content key, into its first delta. Only
+	// deltas up to and including the finish chunk are candidates.
+	var target map[string]any
+	var fallback map[string]any
+	finished := false
+	for _, o := range objs {
+		choices, _ := asSlice(o["choices"])
+		for _, raw := range choices {
+			c, _ := asMap(raw)
+			d, ok := asMap(c["delta"])
+			if ok && !finished {
+				if _, has := d["content"]; has && target == nil {
+					target = d
+				}
+				if fallback == nil {
+					fallback = d
+				}
+			}
+			if c["finish_reason"] != nil {
+				finished = true
+			}
 		}
+	}
+	if target == nil {
+		target = fallback
+	}
+	if target == nil {
+		return errors.New("chat stream has no editable text delta")
+	}
+	for _, o := range objs {
 		choices, _ := asSlice(o["choices"])
 		for _, raw := range choices {
 			c, _ := asMap(raw)
 			d, _ := asMap(c["delta"])
 			if _, ok := d["content"]; ok {
-				if !written {
-					d["content"] = text
-					written = true
-				} else {
-					d["content"] = ""
-				}
+				d["content"] = ""
 			}
+		}
+	}
+	target["content"] = text
+	for i, o := range objs {
+		if o == nil {
+			continue
 		}
 		r.Events[i].Data, e = replaceFrameData(r.Events[i].Data, o)
 		if e != nil {
 			return e
 		}
-	}
-	if !written {
-		return errors.New("chat stream has no editable text delta")
 	}
 	return nil
 }
