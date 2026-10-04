@@ -19,6 +19,7 @@ import {
   type ResponseBlock,
   type ResponseRevision,
 } from "@/lib/response-viewer";
+import { splitFences } from "@/lib/fences";
 
 type Expansion = { open: boolean | null; generation: number };
 // Expand/collapse all stops cascading here so huge payloads stay responsive.
@@ -160,46 +161,6 @@ function JSONEntries({
       )}
     </dl>
   );
-}
-
-type Chunk = { code: boolean; lang: string; text: string };
-
-// Splits Markdown fenced code blocks line by line: a fence closes only on its
-// own line with at least as many of the same marker as opened it.
-function splitFences(text: string): Chunk[] {
-  const lines = text.split("\n"),
-    chunks: Chunk[] = [];
-  let prose: string[] = [];
-  const flush = () => {
-    if (prose.join("").trim())
-      chunks.push({ code: false, lang: "", text: prose.join("\n") });
-    prose = [];
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const open = lines[i].match(/^ {0,3}(`{3,}|~{3,})([^`]*)$/);
-    if (open) {
-      const marker = open[1],
-        close = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}\\s*$`);
-      let end = i + 1;
-      while (end < lines.length && !close.test(lines[end])) end++;
-      if (end < lines.length) {
-        flush();
-        chunks.push({
-          code: true,
-          lang: open[2].trim(),
-          text: lines.slice(i + 1, end).join("\n"),
-        });
-        i = end;
-        continue;
-      }
-      // Unclosed fence: nothing later can close it, so the rest is prose.
-      prose.push(...lines.slice(i));
-      break;
-    }
-    prose.push(lines[i]);
-  }
-  flush();
-  return chunks;
 }
 
 function AnswerText({ text }: { text: string }) {
