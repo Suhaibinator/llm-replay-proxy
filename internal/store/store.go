@@ -102,6 +102,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err = s.migrateMatchingKeys(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate matching keys: %w", err)
+	}
 	return s, nil
 }
 

@@ -49,7 +49,7 @@ rate, completion errors, and separate upstream/replay duration and first-SSE-
 event percentiles. Record-mode requests are cache bypasses. Existing history
 from an older database remains untimed rather than being treated as zero.
 
-Matching uses a versioned SHA-256 input containing the API route, fixed non-secret upstream configuration, and canonical JSON request. Object property order is ignored; array order, string contents, and exact numeric precision are preserved. Streaming and non-streaming requests are distinct. There is no fuzzy matching.
+Matching uses a versioned SHA-256 input containing the API route, fixed non-secret upstream configuration, and canonical JSON request. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
 
 Collection-specific JSON Pointer exclusions remove fields only from matching, never from the forwarded request. For example, `/metadata/run_id` ignores a volatile run identifier. Matching rules are immutable: create a new collection to change exclusions. Use the request comparison panel to inspect changing fields before adding exclusions.
 

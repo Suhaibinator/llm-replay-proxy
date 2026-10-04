@@ -39,6 +39,30 @@ route mismatch.
 blank delimiter. `Event.offset_ms` is the relative capture time. Edits must retain
 valid event order, identities, completion, and agreement with final output.
 
+## Matching keys
+
+Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
+exclusions also matches as `[]`. Earlier builds canonicalized empty arrays as
+`null` under the same canonical version, so `{"tools":[]}` and
+`{"tools":null}` shared a recording. Opening a database runs a one-time,
+transactional re-key (recorded as `rekey-empty-arrays-1` in `store_migrations`)
+that recomputes every recording's key and every revision's matching input from
+the stored request, route, upstream identity, and collection exclusions:
+
+- A revision whose request now has a different key than its recording's
+  active request moves to the recording for that key; if none exists, one is
+  created with the newest such revision active. Requests that differ only in
+  `[]` versus `null` therefore replay what was recorded for that exact shape.
+- When several recordings now share a key (possible only with array-element
+  exclusions), the one with the newest active revision keeps serving; the
+  others' revisions become its inactive history and the emptied recordings are
+  removed. No revision is deleted. History rows keep their original keys.
+
+Snapshots exported by earlier builds that contain such recordings fail import
+validation (`snapshot recording key or matching input does not match request`).
+Import such a snapshot with an earlier build, then open that database with this
+build so the re-key applies, and re-export it if a portable snapshot is needed.
+
 Shared Go data types are in `internal/model`. Storage exposes atomic
 `PublishIfActive` and `RestoreIfActive` operations for optimistic editing, while
 live successful recordings use `Publish`. Network reads, replay delays, and
