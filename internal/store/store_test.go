@@ -421,3 +421,31 @@ func TestImportRejectsTamperedSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalyticsDateWindowHandlesOffsets(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	settings, _ := s.Settings(ctx)
+	from := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+	for i, stamp := range []string{
+		"2025-01-01T00:00:00Z",      // far outside: excluded by SQL
+		"2026-10-02T23:59:59.9Z",    // just before: excluded
+		"2026-10-02T20:00:00-12:00", // 10-03T08:00Z: local date precedes
+		"2026-10-04T13:00:00+14:00", // 10-03T23:00Z: local date follows
+		"2026-10-03T12:00:00.5Z",    // plainly inside
+		"2026-10-04T00:00:00Z",      // end is exclusive
+		"2026-10-03 12:00:00",       // unparseable: skipped
+	} {
+		if err := s.AddHistory(ctx, model.History{CollectionID: settings.ActiveCollectionID, Route: "/v1/responses", Key: fmt.Sprint(i), Request: []byte(`{}`), Outcome: "hit", Source: "replay", CreatedAt: stamp}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := s.Analytics(ctx, settings.ActiveCollectionID, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Total != 3 || a.LifetimeTotal != 7 {
+		t.Fatalf("total %d lifetime %d, want 3 and 7", a.Total, a.LifetimeTotal)
+	}
+}

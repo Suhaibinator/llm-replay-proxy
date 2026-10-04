@@ -158,3 +158,20 @@ func TestStreamedToolArgumentConsistency(t *testing.T) {
 		t.Fatal("accepted incomplete tool JSON")
 	}
 }
+func TestMessagesParameterlessToolStream(t *testing.T) {
+	start := `{"type":"message_start","message":{"id":"m1","type":"message","content":[]}}`
+	block := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"now","input":{}}}`
+	empty := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+	stop := `{"type":"content_block_stop","index":0}`
+	tail := []string{`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`, `{"type":"message_stop"}`}
+	// Claude streams an empty partial_json for tools without parameters; the
+	// start block's input ({}) stands.
+	if err := validateStructure(MessagesRoute, true, structureRevision(append([]string{start, block, empty, stop}, tail...)...)); err != nil {
+		t.Fatal(err)
+	}
+	// The leading empty delta also precedes real arguments.
+	args := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"tz\":\"UTC\"}"}}`
+	if err := validateStructure(MessagesRoute, true, structureRevision(append([]string{start, block, empty, args, stop}, tail...)...)); err != nil {
+		t.Fatal(err)
+	}
+}

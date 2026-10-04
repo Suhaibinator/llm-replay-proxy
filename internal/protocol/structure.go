@@ -616,7 +616,9 @@ func messagesStructure(objects []map[string]any) error {
 			if block == nil || !block.open {
 				return fmt.Errorf("stop targets an unopened block")
 			}
-			if block.hasArguments {
+			// Parameterless tools stream only an empty partial_json; the
+			// object input from content_block_start then stands.
+			if block.hasArguments && block.arguments.Len() > 0 {
 				if err := validArguments(block.arguments.String()); err != nil {
 					return err
 				}

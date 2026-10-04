@@ -316,3 +316,113 @@ test("CRLF multiline SSE and comments preserve raw frames", () => {
   assert.equal(view.frames[1].offset_ms, 25);
   assert.equal(view.blocks[0].text, "Exact");
 });
+test("Chat streams keep tool identity, list deltas and choice order", () => {
+  const revision = {
+    ...rev(""),
+    events: [
+      event({
+        choices: [
+          {
+            index: 1,
+            delta: { content: "second", annotations: [{ n: 1 }] },
+          },
+          {
+            index: 0,
+            delta: {
+              content: "first",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "lookup", arguments: "" },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      event({
+        choices: [
+          {
+            index: 1,
+            delta: { annotations: [{ n: 2 }], ["__proto__"]: { refusal: "x" } },
+          },
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: null,
+                  type: null,
+                  function: { name: null, arguments: '{"q":1}' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    ],
+  };
+  const view = responseView("/v1/chat/completions", true, revision);
+  const tool = view.blocks.find((b) => b.kind === "tool");
+  assert.equal(tool.id, "call_1");
+  assert.match(tool.title, /lookup/);
+  assert.equal(tool.arguments.q.source, "1");
+  assert.equal(view.blocks.find((b) => b.kind === "text").text, "first");
+  assert.equal(view.blocks.filter((b) => b.kind === "refusal").length, 0);
+  const answer = view.blocks.filter((b) => b.kind === "text")[1];
+  assert.equal(answer.text, "second");
+  const extra = view.blocks.find(
+    (b) => b.title === "Additional message fields",
+  );
+  assert.deepEqual(
+    extra.raw.annotations.map((a) => a.n.source),
+    ["1", "2"],
+  );
+});
+test("Anthropic tools with empty streamed input keep an object input", () => {
+  const revision = {
+    ...rev(""),
+    events: [
+      event({ type: "message_start", message: { id: "m", content: [] } }),
+      event({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "t", name: "now", input: {} },
+      }),
+      event({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "" },
+      }),
+    ],
+  };
+  const view = responseView("/v1/messages", true, revision);
+  const tool = view.blocks.find((b) => b.kind === "tool");
+  assert.notEqual(tool.arguments, "");
+  assert.deepEqual(Object.keys(tool.arguments), []);
+});
+test("Responses reasoning content parts are readable", () => {
+  const view = responseView(
+    "/v1/responses",
+    false,
+    rev(
+      JSON.stringify({
+        output: [
+          {
+            type: "reasoning",
+            id: "r",
+            summary: [],
+            content: [{ type: "reasoning_text", text: "thinking" }],
+          },
+        ],
+      }),
+    ),
+  );
+  assert.equal(
+    view.blocks.find((b) => b.kind === "reasoning").text,
+    "thinking",
+  );
+});
