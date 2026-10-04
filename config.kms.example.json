@@ -1,0 +1,10 @@
+{
+  "kms": {
+    "endpoint": "kms.example.com:8443",
+    "namespace": "demo/llm-replay-proxy",
+    "config_key": "proxy/config",
+    "token_env": "REPLAY_KMS_TOKEN",
+    "ca_file": "/path/to/kms-server-ca.pem",
+    "timeout_ms": 5000
+  }
+}

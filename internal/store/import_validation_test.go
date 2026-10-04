@@ -1,0 +1,60 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"path/filepath"
+	"testing"
+)
+
+func TestImportRejectsCorruptionWithoutPartialCollections(t *testing.T) {
+	for _, tc := range []struct{ name, mutation string }{
+		{"matching key", `UPDATE recordings SET key='forged'`},
+		{"matching rules", `UPDATE collections SET exclusions='["/stream"]'`},
+		{"incomplete stream", `UPDATE revisions SET events='[]'`},
+		{"response headers", `UPDATE revisions SET headers='{"Set-Cookie":"session=forged"}'`},
+		{"provenance", `UPDATE revisions SET request='{"stream":true,"input":"changed"}'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			source := openTest(t)
+			settings, err := source.Settings(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = source.Publish(ctx, testRecording(settings.ActiveCollectionID, "original"), testRevision("resp_original", "recorded")); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "snapshot.sqlite")
+			if err = source.Export(ctx, settings.ActiveCollectionID, path); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = raw.Exec(tc.mutation); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if err = raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			destination := openTest(t)
+			before, err := destination.Collections(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = destination.Import(ctx, path); err == nil {
+				t.Fatal("corrupted snapshot imported")
+			}
+			after, err := destination.Collections(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after) != len(before) {
+				t.Fatalf("failed import left %d collections, expected %d", len(after), len(before))
+			}
+		})
+	}
+}
