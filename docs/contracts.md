@@ -84,10 +84,10 @@ the stored request, route, upstream identity, and collection exclusions:
   others' revisions become its inactive history and the emptied recordings are
   removed. No revision is deleted. History rows keep their original keys.
 
-Snapshots exported by earlier builds that contain such recordings fail import
-validation (`snapshot recording key or matching input does not match request`).
-Import such a snapshot with an earlier build, then open that database with this
-build so the re-key applies, and re-export it if a portable snapshot is needed.
+Snapshots exported by earlier builds still import: provenance is accepted when
+it matches either the current key or the earlier empty-array-as-`null` key, and
+any collection with earlier keys gets the same re-key inside the import
+transaction. Provenance that matches neither is rejected as before.
 
 Shared Go data types are in `internal/model`. Storage exposes atomic
 `PublishIfActive` and `RestoreIfActive` operations for optimistic editing, while

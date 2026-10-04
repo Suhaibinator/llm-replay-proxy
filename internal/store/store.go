@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -881,6 +883,21 @@ func uniqueImportedName(ctx context.Context, tx *sql.Tx, name string) (string, e
 type importedRecording struct {
 	r         model.Recording
 	revisions []model.Revision
+	// legacyKeys marks provenance computed by builds that keyed [] as null; the
+	// imported collection is re-keyed before commit.
+	legacyKeys bool
+}
+
+// snapshotKeyMatches reports whether stored provenance is what the request
+// produces now, or what pre-empty-array-fix builds produced (legacy).
+func snapshotKeyMatches(route, identity string, request []byte, exclusions []string, storedKey string, storedInput []byte) (ok, legacy bool) {
+	if k, in, err := matching.Key(route, identity, request, exclusions); err == nil && k == storedKey && bytes.Equal(in, storedInput) {
+		return true, false
+	}
+	if k, in, err := matching.LegacyKey(route, identity, request, exclusions); err == nil && k == storedKey && bytes.Equal(in, storedInput) {
+		return true, true
+	}
+	return false, false
 }
 
 type importedCollection struct {
@@ -995,6 +1012,11 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 				return nil, e
 			}
 		}
+		if slices.ContainsFunc(item.recordings, func(r importedRecording) bool { return r.legacyKeys }) {
+			if _, e = rekeyCollection(ctx, tx, newCID, item.c.Exclusions); e != nil {
+				return nil, fmt.Errorf("re-key imported collection: %w", e)
+			}
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
@@ -1104,14 +1126,14 @@ func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64
 		if !json.Valid(r.Request) || !json.Valid(r.MatchingInput) {
 			return nil, errors.New("snapshot contains invalid recording JSON")
 		}
-		key, input, err := matching.Key(r.Route, r.UpstreamIdentity, r.Request, exclusions)
-		if err != nil || key != r.Key || string(input) != string(r.MatchingInput) {
+		matches, legacy := snapshotKeyMatches(r.Route, r.UpstreamIdentity, r.Request, exclusions, r.Key, r.MatchingInput)
+		if !matches {
 			return nil, errors.New("recording key or matching input does not match request")
 		}
 		if requestStreaming(r.Request) != r.Streaming {
 			return nil, errors.New("recording streaming flag disagrees with request")
 		}
-		out = append(out, importedRecording{r: r})
+		out = append(out, importedRecording{r: r, legacyKeys: legacy})
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("read recordings: %w", err)
@@ -1122,17 +1144,19 @@ func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64
 	// Revisions are read after the recordings cursor is closed, so a source read
 	// error in either query surfaces instead of silently shortening the import.
 	for i := range out {
-		if out[i].revisions, err = readSnapshotRevisions(ctx, src, out[i].r, exclusions); err != nil {
+		var legacy bool
+		if out[i].revisions, legacy, err = readSnapshotRevisions(ctx, src, out[i].r, exclusions); err != nil {
 			return nil, err
 		}
+		out[i].legacyKeys = out[i].legacyKeys || legacy
 	}
 	return out, nil
 }
 
-func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, exclusions []string) ([]model.Revision, error) {
+func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, exclusions []string) (_ []model.Revision, legacyKeys bool, _ error) {
 	rows, err := src.QueryContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE recording_id=? ORDER BY id", r.ID)
 	if err != nil {
-		return nil, fmt.Errorf("revisions: %w", err)
+		return nil, false, fmt.Errorf("revisions: %w", err)
 	}
 	defer rows.Close()
 	var out []model.Revision
@@ -1140,7 +1164,7 @@ func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, 
 	for rows.Next() {
 		v, err := scanRevision(rows)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		// Match publication: a JSON null is the empty value, never stored as null.
 		if v.Headers == nil {
@@ -1150,20 +1174,21 @@ func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, 
 			v.Events = []model.Event{}
 		}
 		if !validTimestamp(v.CreatedAt) {
-			return nil, errors.New("revision has an invalid created_at")
+			return nil, false, errors.New("revision has an invalid created_at")
 		}
-		vk, vi, ve := matching.Key(r.Route, r.UpstreamIdentity, v.Request, exclusions)
-		if ve != nil || vk != r.Key || string(vi) != string(v.MatchingInput) {
-			return nil, errors.New("revision provenance does not match recording key")
+		matches, legacy := snapshotKeyMatches(r.Route, r.UpstreamIdentity, v.Request, exclusions, r.Key, v.MatchingInput)
+		if !matches {
+			return nil, false, errors.New("revision provenance does not match recording key")
 		}
+		legacyKeys = legacyKeys || legacy
 		if requestStreaming(v.Request) != r.Streaming {
-			return nil, errors.New("revision streaming flag disagrees with request")
+			return nil, false, errors.New("revision streaming flag disagrees with request")
 		}
 		if err = validateImportedHeaders(v.Headers); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if err = protocol.Validate(r.Route, r.Streaming, v); err != nil {
-			return nil, fmt.Errorf("invalid revision: %w", err)
+			return nil, false, fmt.Errorf("invalid revision: %w", err)
 		}
 		out = append(out, v)
 		if v.ID == r.ActiveRevisionID {
@@ -1172,13 +1197,13 @@ func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, 
 		}
 	}
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("read revisions: %w", err)
+		return nil, false, fmt.Errorf("read revisions: %w", err)
 	}
 	if active == nil {
-		return nil, errors.New("recording references missing active revision")
+		return nil, false, errors.New("recording references missing active revision")
 	}
 	if string(active.Request) != string(r.Request) || string(active.MatchingInput) != string(r.MatchingInput) {
-		return nil, errors.New("recording provenance disagrees with active revision")
+		return nil, false, errors.New("recording provenance disagrees with active revision")
 	}
-	return out, rows.Close()
+	return out, legacyKeys, rows.Close()
 }

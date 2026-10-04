@@ -19,6 +19,17 @@ const canonicalVersion = 1
 // Key returns the SHA-256 key and the exact, versioned input hashed to produce it.
 // Exclusions affect only the copy used for matching; body is never modified.
 func Key(route, identity string, body []byte, exclusions []string) (string, []byte, error) {
+	return key(route, identity, body, exclusions, false)
+}
+
+// LegacyKey reproduces keys from builds that canonicalized an empty request
+// array as null. It exists only to recognise recordings made by those builds
+// (for example in older snapshots) so they can be re-keyed; never match with it.
+func LegacyKey(route, identity string, body []byte, exclusions []string) (string, []byte, error) {
+	return key(route, identity, body, exclusions, true)
+}
+
+func key(route, identity string, body []byte, exclusions []string, legacyEmptyArrays bool) (string, []byte, error) {
 	if route == "" {
 		return "", nil, errors.New("match: route is required")
 	}
@@ -32,6 +43,10 @@ func Key(route, identity string, body []byte, exclusions []string) (string, []by
 	}
 	if _, ok := value.(map[string]any); !ok {
 		return "", nil, errors.New("match: request body must be a JSON object")
+	}
+	if legacyEmptyArrays {
+		// Old builds decoded [] as a nil slice before exclusions ran.
+		value = nilEmptyArrays(value)
 	}
 	value = applyExclusions(value, exclusions)
 	canonicalBody, err := json.Marshal(value)
@@ -52,6 +67,23 @@ func Key(route, identity string, body []byte, exclusions []string) (string, []by
 	}
 	sum := sha256.Sum256(input)
 	return hex.EncodeToString(sum[:]), input, nil
+}
+
+func nilEmptyArrays(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for k, child := range v {
+			v[k] = nilEmptyArrays(child)
+		}
+	case []any:
+		if len(v) == 0 {
+			return []any(nil)
+		}
+		for i, child := range v {
+			v[i] = nilEmptyArrays(child)
+		}
+	}
+	return value
 }
 
 // ValidateExclusions verifies RFC 6901 JSON Pointer syntax. The document root
