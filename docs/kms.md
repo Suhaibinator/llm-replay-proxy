@@ -66,7 +66,7 @@ For secrets-only integration, omit `config_key`, keep non-secret upstream settin
 
 ## Precedence and failures
 
-Non-secret configuration precedence is **built-in defaults → KMS JSON parameter → local JSON file → environment → CLI flags**. JSON objects are merged recursively so a local upstream identity or header override can retain the remote URL. The KMS parameter cannot replace KMS bootstrap settings or contain inline `api_key` values.
+Non-secret configuration precedence is **built-in defaults → KMS JSON parameter → local JSON file → environment → CLI flags**. JSON objects are merged recursively so a local upstream identity or header override can retain the remote URL. Secret references (`api_key_secret`) are the exception: a local reference replaces the remote one as a whole, so `{"key": "other-key"}` reads the current version of `other-key` rather than inheriting a remote `version` or `label` pin. The KMS parameter cannot replace KMS bootstrap settings or contain inline `api_key` values.
 
 Credential precedence is **`REPLAY_{CHAT,RESPONSES,ANTHROPIC}_API_KEY` → named `api_key_env` → local inline `api_key` → KMS secret reference**. An explicitly empty environment credential suppresses a KMS secret read, allowing credential-free replay when non-secret settings are available. A local inline key can be cleared with `"api_key": ""` to use a secret reference instead.
 
