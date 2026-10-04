@@ -62,16 +62,30 @@ An `api_key_secret` supports `key`, optional immutable `version`, optional `labe
 
 Pin `kms.config_version` to select an immutable JSON parameter version. Pin secret versions inside that document when the configuration and credentials must refer to a repeatable generation. Omitting versions reads the current values at startup. This integration uses the existing SDK's read APIs, not the managed-release hot-reload layer.
 
+### JWT signing key
+
+The key that signs client access tokens can also live in a KMS secret. Store the base64 text of at least 32 random bytes (for example from `openssl rand -base64 32`) and reference it from the local file or the JSON parameter:
+
+```json
+{
+  "auth": {
+    "signing_key_secret": {"key": "replay-proxy/jwt-key", "version": 1}
+  }
+}
+```
+
+`signing_key_secret` accepts the same fields as `api_key_secret` (`key`, `version` or `label`, `binding_key_env`) and cannot be combined with `auth.signing_key_file`. `REPLAY_JWT_KEY` overrides it without a KMS read. Both the server and `replay-proxy token issue` read the secret at startup, so pass the same configuration to both. To rotate, write a new secret version, update a pinned `version` if you use one, and restart: all previously issued tokens stop working. Without any configured key the proxy generates `<database>.jwt-key` locally instead.
+
 For secrets-only integration, omit `config_key`, keep non-secret upstream settings in the local file, and use `api_key_secret` on those upstream entries. The proxy never provisions or mutates KMS resources.
 
 ## Precedence and failures
 
 Non-secret configuration precedence is **built-in defaults → KMS JSON parameter → local JSON file → environment → CLI flags**. JSON objects are merged recursively so a local upstream identity or header override can retain the remote URL. The KMS parameter cannot replace KMS bootstrap settings or contain inline `api_key` values.
 
-Credential precedence is **`REPLAY_{CHAT,RESPONSES,ANTHROPIC}_API_KEY` → named `api_key_env` → local inline `api_key` → KMS secret reference**. An explicitly empty environment credential suppresses a KMS secret read, allowing credential-free replay when non-secret settings are available. A local inline key can be cleared with `"api_key": ""` to use a secret reference instead.
+Credential precedence is **`REPLAY_{CHAT,RESPONSES,ANTHROPIC}_API_KEY` → named `api_key_env` → local inline `api_key` → KMS secret reference**. JWT signing key precedence is **`REPLAY_JWT_KEY` → `auth.signing_key_file` or `auth.signing_key_secret` → generated `<database>.jwt-key`**. An explicitly empty environment credential suppresses a KMS secret read, allowing credential-free replay when non-secret settings are available. A local inline key can be cleared with `"api_key": ""` to use a secret reference instead.
 
 An explicitly configured KMS parameter/secret that cannot be resolved fails startup; unavailable, denied, missing, or malformed data does not silently fall back to defaults. Errors identify the operation and failure category without echoing remote error details or credential values. The last running process is unaffected by later KMS outages because its startup snapshot is held in memory.
 
-For completely offline startup, use a local configuration with the same non-secret upstream URLs, identities, and headers and omit the `kms` object and secret references. The original exact matching keys remain valid. Do not export secrets into SQLite to make offline startup work.
+For completely offline startup, use a local configuration with the same non-secret upstream URLs, identities, and headers and omit the `kms` object and secret references. Supply the JWT signing key through `REPLAY_JWT_KEY` or `auth.signing_key_file` so existing tokens keep working. The original exact matching keys remain valid. Do not export secrets into SQLite to make offline startup work.
 
 Tests use the KMS project's real SDK with its in-process gRPC fake to verify parameter/secret reads, version pins, binding credentials, overrides, transport validation, and failures without requiring a live KMS installation.
