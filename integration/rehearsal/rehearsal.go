@@ -24,7 +24,17 @@ type Client struct {
 	tools   map[proto_models.InferenceAPI]ai.Tool
 }
 
+// New creates a client for a proxy that does not require tokens (for
+// example in-process test stacks or auth.disabled on loopback).
 func New(ctx context.Context, baseURL, model string) (*Client, error) {
+	return NewWithToken(ctx, baseURL, model, "")
+}
+
+// NewWithToken creates a client that authenticates with a token issued by
+// `replay-proxy token issue`. Go Common's default HTTP authentication sends it
+// as `Authorization: Bearer` for Chat Completions and Responses and as
+// `x-api-key` for Anthropic Messages; the proxy accepts both.
+func NewWithToken(ctx context.Context, baseURL, model, token string) (*Client, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if baseURL == "" {
 		return nil, fmt.Errorf("proxy base URL is required")
@@ -43,6 +53,11 @@ func New(ctx context.Context, baseURL, model string) (*Client, error) {
 	}
 	cfg := genai.RuntimeFactoryConfig{
 		Providers: []config.ProviderConfig{provider},
+	}
+	if token != "" {
+		cfg.Providers[0].HTTP.Auth = ""
+		cfg.Providers[0].CredentialRef = providerID + "-token"
+		cfg.Credentials = []config.CredentialBinding{{Name: providerID + "-token", Secret: config.NewSecret(token)}}
 	}
 	if err := config.ValidateCredentialBindings(cfg.Providers, cfg.Credentials); err != nil {
 		return nil, fmt.Errorf("validate Go Common provider: %w", err)

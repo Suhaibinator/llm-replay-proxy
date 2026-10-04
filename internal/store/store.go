@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -24,6 +26,11 @@ import (
 
 var ErrNotFound = errors.New("store: not found")
 var ErrConflict = errors.New("store: active revision changed")
+
+// ErrInvalidSnapshot wraps every Import failure caused by the snapshot itself:
+// an unreadable or non-SQLite file, failed integrity or foreign key checks, an
+// unexpected schema, or rows that violate store invariants.
+var ErrInvalidSnapshot = errors.New("invalid snapshot")
 
 type Store struct {
 	db   *sql.DB
@@ -64,6 +71,7 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_collection_created ON history(collection_id,id DESC);
 CREATE INDEX IF NOT EXISTS revisions_recording ON revisions(recording_id,id DESC);
+CREATE INDEX IF NOT EXISTS history_collection_time ON history(collection_id,created_at);
 `
 
 func Open(path string) (*Store, error) {
@@ -101,6 +109,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err = s.migrateMatchingKeys(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate matching keys: %w", err)
+	}
 	return s, nil
 }
 
@@ -119,6 +131,10 @@ func (s *Store) ensureHistoryColumns(ctx context.Context) error {
 			return err
 		}
 		seen[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -560,7 +576,19 @@ func (s *Store) Analytics(ctx context.Context, cid int64, from, to time.Time) (m
 	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM history WHERE collection_id=?", cid).Scan(&a.LifetimeTotal); err != nil {
 		return a, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT outcome,source,duration_ms,first_event_ms,created_at,lookup_outcome FROM history WHERE collection_id=? ORDER BY id`, cid)
+	// created_at is RFC3339 text, possibly with a non-UTC offset from imports,
+	// so it isn't strictly ordered as a string. Narrow the scan by date prefix
+	// with a margin wider than any UTC offset; the exact range check is below.
+	lower := from.UTC().AddDate(0, 0, -1).Format(time.DateOnly)
+	query := `SELECT outcome,source,duration_ms,first_event_ms,created_at,lookup_outcome FROM history WHERE collection_id=? AND created_at>=?`
+	args := []any{cid, lower}
+	// A year past 9999 formats with five digits ("10000-01-01"), which sorts
+	// before every four-digit year; no upper text bound is needed there.
+	if upper := to.UTC().AddDate(0, 0, 2); upper.Year() <= 9999 {
+		query += ` AND created_at<?`
+		args = append(args, upper.Format(time.DateOnly))
+	}
+	rows, err := s.db.QueryContext(ctx, query+` ORDER BY id`, args...)
 	if err != nil {
 		return model.Analytics{}, err
 	}
@@ -775,8 +803,10 @@ func (s *Store) HasProviderState(ctx context.Context, cid int64, stateID string)
 	return false, rows.Err()
 }
 
-// Export creates a transactionally consistent, collection-scoped SQLite snapshot.
-// The destination must not already exist, preventing accidental replacement.
+// Export creates a transactionally consistent, collection-scoped SQLite snapshot
+// containing the collection, its recordings and revisions, but no request
+// history. The destination must not already exist, preventing accidental
+// replacement.
 func (s *Store) Export(ctx context.Context, collectionID int64, destPath string) error {
 	if destPath == "" {
 		return errors.New("export destination is required")
@@ -820,9 +850,15 @@ func (s *Store) Export(ctx context.Context, collectionID int64, destPath string)
 	if _, err = tx.ExecContext(ctx, "DELETE FROM collections WHERE id<>?", collectionID); err != nil {
 		return err
 	}
+	// History holds every logged request body, including misses and errors.
+	// Import never reads it, so it must not leave this machine in a snapshot.
+	if _, err = tx.ExecContext(ctx, "DELETE FROM history"); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	// Rebuild the file so pages freed by the deletes do not retain their bytes.
 	if _, err = out.ExecContext(ctx, "VACUUM"); err != nil {
 		return fmt.Errorf("compact snapshot: %w", err)
 	}
@@ -844,9 +880,48 @@ func uniqueImportedName(ctx context.Context, tx *sql.Tx, name string) (string, e
 	}
 }
 
+type importedRecording struct {
+	r         model.Recording
+	revisions []model.Revision
+	// legacyKeys marks provenance computed by builds that keyed [] as null; the
+	// imported collection is re-keyed before commit.
+	legacyKeys bool
+}
+
+// snapshotKeyMatches reports whether stored provenance is what the request
+// produces now, or what pre-empty-array-fix builds produced (legacy).
+func snapshotKeyMatches(route, identity string, request []byte, exclusions []string, storedKey string, storedInput []byte) (ok, legacy bool) {
+	if k, in, err := matching.Key(route, identity, request, exclusions); err == nil && k == storedKey && bytes.Equal(in, storedInput) {
+		return true, false
+	}
+	if k, in, err := matching.LegacyKey(route, identity, request, exclusions); err == nil && k == storedKey && bytes.Equal(in, storedInput) {
+		return true, true
+	}
+	return false, false
+}
+
+type importedCollection struct {
+	c          model.Collection
+	oldID      int64
+	recordings []importedRecording
+}
+
+// validTimestamp reports whether v uses the RFC 3339 form the store writes.
+func validTimestamp(v string) bool {
+	_, err := time.Parse(time.RFC3339Nano, v)
+	return err == nil
+}
+
 // Import copies complete collections and their immutable revision history from a
 // validated replay-proxy SQLite snapshot. IDs are remapped and the local active
-// collection and timing settings are intentionally retained.
+// collection and timing settings are intentionally retained. Request history is
+// never imported.
+//
+// Every failure caused by the snapshot's contents wraps ErrInvalidSnapshot.
+// Collection names are trimmed and must not be blank; null exclusions, revision
+// headers and events are normalised to empty values exactly as publication does;
+// created_at values that are not RFC 3339 timestamps reject the snapshot rather
+// than being silently replaced.
 func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collection, error) {
 	if sourcePath == "" {
 		return nil, errors.New("import source is required")
@@ -863,150 +938,17 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 	}
 	defer src.Close()
 	src.SetMaxOpenConns(4)
-	var integrity string
-	if err = src.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
-		return nil, fmt.Errorf("invalid snapshot: %w", err)
-	}
-	if integrity != "ok" {
-		return nil, fmt.Errorf("invalid snapshot: integrity check: %s", integrity)
-	}
-	fkRows, fkErr := src.QueryContext(ctx, "PRAGMA foreign_key_check")
-	if fkErr != nil {
-		return nil, fmt.Errorf("invalid snapshot foreign keys: %w", fkErr)
-	}
-	if fkRows.Next() {
-		fkRows.Close()
-		return nil, errors.New("invalid snapshot: foreign key violation")
-	}
-	if fkErr = fkRows.Close(); fkErr != nil {
-		return nil, fkErr
-	}
-	rows, err := src.QueryContext(ctx, "SELECT id,name,exclusions,created_at FROM collections ORDER BY id")
-	if err != nil {
-		return nil, fmt.Errorf("invalid snapshot schema: %w", err)
-	}
-	type importedRecording struct {
-		r         model.Recording
-		revisions []model.Revision
-	}
-	type importedCollection struct {
-		c          model.Collection
-		oldID      int64
-		recordings []importedRecording
-	}
-	var imports []importedCollection
-	for rows.Next() {
-		var x importedCollection
-		var ex string
-		if err = rows.Scan(&x.oldID, &x.c.Name, &ex, &x.c.CreatedAt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if err = json.Unmarshal([]byte(ex), &x.c.Exclusions); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("invalid exclusions: %w", err)
-		}
-		if err = matching.ValidateExclusions(x.c.Exclusions); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("invalid exclusions: %w", err)
-		}
-		imports = append(imports, x)
-	}
-	if err = rows.Close(); err != nil {
-		return nil, err
-	}
-	if len(imports) == 0 {
-		return nil, errors.New("snapshot contains no collections")
-	}
 	// Fully read and validate the immutable source before taking the destination
 	// write lock. The transaction below then contains inserts only.
-	for ci := range imports {
-		item := &imports[ci]
-		rrows, e := src.QueryContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? ORDER BY id", item.oldID)
-		if e != nil {
-			return nil, fmt.Errorf("invalid snapshot recordings: %w", e)
+	imports, err := readSnapshot(ctx, src)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
 		}
-		for rrows.Next() {
-			r, e := scanRecording(rrows)
-			if e != nil {
-				rrows.Close()
-				return nil, e
-			}
-			if r.ActiveRevisionID == 0 {
-				rrows.Close()
-				return nil, errors.New("snapshot recording has no active revision")
-			}
-			if !json.Valid(r.Request) || !json.Valid(r.MatchingInput) {
-				rrows.Close()
-				return nil, errors.New("snapshot contains invalid recording JSON")
-			}
-			key, input, e := matching.Key(r.Route, r.UpstreamIdentity, r.Request, item.c.Exclusions)
-			if e != nil || key != r.Key || string(input) != string(r.MatchingInput) {
-				rrows.Close()
-				return nil, errors.New("snapshot recording key or matching input does not match request")
-			}
-			if requestStreaming(r.Request) != r.Streaming {
-				rrows.Close()
-				return nil, errors.New("snapshot recording streaming flag disagrees with request")
-			}
-			loaded := importedRecording{r: r}
-			vrows, e := src.QueryContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE recording_id=? ORDER BY id", r.ID)
-			if e != nil {
-				rrows.Close()
-				return nil, e
-			}
-			var active *model.Revision
-			for vrows.Next() {
-				v, e := scanRevision(vrows)
-				if e != nil {
-					vrows.Close()
-					rrows.Close()
-					return nil, e
-				}
-				vk, vi, ve := matching.Key(r.Route, r.UpstreamIdentity, v.Request, item.c.Exclusions)
-				if ve != nil || vk != r.Key || string(vi) != string(v.MatchingInput) {
-					vrows.Close()
-					rrows.Close()
-					return nil, errors.New("snapshot revision provenance does not match recording key")
-				}
-				if requestStreaming(v.Request) != r.Streaming {
-					vrows.Close()
-					rrows.Close()
-					return nil, errors.New("snapshot revision streaming flag disagrees with request")
-				}
-				if e = validateImportedHeaders(v.Headers); e != nil {
-					vrows.Close()
-					rrows.Close()
-					return nil, e
-				}
-				if e = protocol.Validate(r.Route, r.Streaming, v); e != nil {
-					vrows.Close()
-					rrows.Close()
-					return nil, fmt.Errorf("invalid revision: %w", e)
-				}
-				loaded.revisions = append(loaded.revisions, v)
-				if v.ID == r.ActiveRevisionID {
-					copy := v
-					active = &copy
-				}
-			}
-			if e = vrows.Close(); e != nil {
-				rrows.Close()
-				return nil, e
-			}
-			if active == nil {
-				rrows.Close()
-				return nil, errors.New("snapshot recording references missing active revision")
-			}
-			if string(active.Request) != string(r.Request) || string(active.MatchingInput) != string(r.MatchingInput) {
-				rrows.Close()
-				return nil, errors.New("snapshot recording provenance disagrees with active revision")
-			}
-			item.recordings = append(item.recordings, loaded)
+		if errors.Is(err, ErrInvalidSnapshot) {
+			return nil, err
 		}
-		if e = rrows.Close(); e != nil {
-			return nil, e
-		}
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSnapshot, err)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1019,12 +961,11 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 		if e != nil {
 			return nil, e
 		}
-		ex, _ := encode(item.c.Exclusions)
-		created := item.c.CreatedAt
-		if created == "" {
-			created = now()
+		ex, e := encode(item.c.Exclusions)
+		if e != nil {
+			return nil, e
 		}
-		res, e := tx.ExecContext(ctx, "INSERT INTO collections(name,exclusions,created_at) VALUES(?,?,?)", name, ex, created)
+		res, e := tx.ExecContext(ctx, "INSERT INTO collections(name,exclusions,created_at) VALUES(?,?,?)", name, ex, item.c.CreatedAt)
 		if e != nil {
 			return nil, e
 		}
@@ -1047,8 +988,14 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 			}
 			var newActive int64
 			for _, v := range loaded.revisions {
-				hj, _ := encode(v.Headers)
-				ej, _ := encode(v.Events)
+				hj, e := encode(v.Headers)
+				if e != nil {
+					return nil, e
+				}
+				ej, e := encode(v.Events)
+				if e != nil {
+					return nil, e
+				}
 				res, e = tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request,matching_input,source,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, newRID, v.Status, hj, v.Body, ej, []byte(v.Request), []byte(v.MatchingInput), v.Source, v.CreatedAt)
 				if e != nil {
 					return nil, e
@@ -1065,9 +1012,198 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 				return nil, e
 			}
 		}
+		if slices.ContainsFunc(item.recordings, func(r importedRecording) bool { return r.legacyKeys }) {
+			if _, e = rekeyCollection(ctx, tx, newCID, item.c.Exclusions); e != nil {
+				return nil, fmt.Errorf("re-key imported collection: %w", e)
+			}
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// readSnapshot loads and validates every row Import copies. Any error it returns
+// describes the snapshot (including read failures of the uploaded file), so the
+// caller classifies all of them as ErrInvalidSnapshot.
+func readSnapshot(ctx context.Context, src *sql.DB) ([]importedCollection, error) {
+	var integrity string
+	if err := src.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return nil, err
+	}
+	if integrity != "ok" {
+		return nil, fmt.Errorf("integrity check: %s", integrity)
+	}
+	if err := checkSnapshotForeignKeys(ctx, src); err != nil {
+		return nil, err
+	}
+	imports, err := readSnapshotCollections(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	if len(imports) == 0 {
+		return nil, errors.New("snapshot contains no collections")
+	}
+	for i := range imports {
+		if imports[i].recordings, err = readSnapshotRecordings(ctx, src, imports[i].oldID, imports[i].c.Exclusions); err != nil {
+			return nil, err
+		}
+	}
+	return imports, nil
+}
+
+func checkSnapshotForeignKeys(ctx context.Context, src *sql.DB) error {
+	rows, err := src.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("foreign keys: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("foreign key violation")
+	}
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("foreign keys: %w", err)
+	}
+	return rows.Close()
+}
+
+func readSnapshotCollections(ctx context.Context, src *sql.DB) ([]importedCollection, error) {
+	rows, err := src.QueryContext(ctx, "SELECT id,name,exclusions,created_at FROM collections ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("schema: %w", err)
+	}
+	defer rows.Close()
+	var imports []importedCollection
+	for rows.Next() {
+		var x importedCollection
+		var ex string
+		if err = rows.Scan(&x.oldID, &x.c.Name, &ex, &x.c.CreatedAt); err != nil {
+			return nil, err
+		}
+		x.c.Name = strings.TrimSpace(x.c.Name)
+		if x.c.Name == "" {
+			return nil, errors.New("collection name is blank")
+		}
+		if !validTimestamp(x.c.CreatedAt) {
+			return nil, fmt.Errorf("collection %q has an invalid created_at", x.c.Name)
+		}
+		if err = json.Unmarshal([]byte(ex), &x.c.Exclusions); err != nil {
+			return nil, fmt.Errorf("invalid exclusions: %w", err)
+		}
+		if x.c.Exclusions == nil {
+			x.c.Exclusions = []string{}
+		}
+		if err = matching.ValidateExclusions(x.c.Exclusions); err != nil {
+			return nil, fmt.Errorf("invalid exclusions: %w", err)
+		}
+		imports = append(imports, x)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("read collections: %w", err)
+	}
+	return imports, rows.Close()
+}
+
+func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64, exclusions []string) ([]importedRecording, error) {
+	rows, err := src.QueryContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? ORDER BY id", collectionID)
+	if err != nil {
+		return nil, fmt.Errorf("recordings: %w", err)
+	}
+	defer rows.Close()
+	var out []importedRecording
+	for rows.Next() {
+		r, err := scanRecording(rows)
+		if err != nil {
+			return nil, err
+		}
+		if r.ActiveRevisionID == 0 {
+			return nil, errors.New("recording has no active revision")
+		}
+		if !validTimestamp(r.CreatedAt) {
+			return nil, errors.New("recording has an invalid created_at")
+		}
+		if !json.Valid(r.Request) || !json.Valid(r.MatchingInput) {
+			return nil, errors.New("snapshot contains invalid recording JSON")
+		}
+		matches, legacy := snapshotKeyMatches(r.Route, r.UpstreamIdentity, r.Request, exclusions, r.Key, r.MatchingInput)
+		if !matches {
+			return nil, errors.New("recording key or matching input does not match request")
+		}
+		if requestStreaming(r.Request) != r.Streaming {
+			return nil, errors.New("recording streaming flag disagrees with request")
+		}
+		out = append(out, importedRecording{r: r, legacyKeys: legacy})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("read recordings: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	// Revisions are read after the recordings cursor is closed, so a source read
+	// error in either query surfaces instead of silently shortening the import.
+	for i := range out {
+		var legacy bool
+		if out[i].revisions, legacy, err = readSnapshotRevisions(ctx, src, out[i].r, exclusions); err != nil {
+			return nil, err
+		}
+		out[i].legacyKeys = out[i].legacyKeys || legacy
+	}
+	return out, nil
+}
+
+func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, exclusions []string) (_ []model.Revision, legacyKeys bool, _ error) {
+	rows, err := src.QueryContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE recording_id=? ORDER BY id", r.ID)
+	if err != nil {
+		return nil, false, fmt.Errorf("revisions: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Revision
+	var active *model.Revision
+	for rows.Next() {
+		v, err := scanRevision(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		// Match publication: a JSON null is the empty value, never stored as null.
+		if v.Headers == nil {
+			v.Headers = map[string]string{}
+		}
+		if v.Events == nil {
+			v.Events = []model.Event{}
+		}
+		if !validTimestamp(v.CreatedAt) {
+			return nil, false, errors.New("revision has an invalid created_at")
+		}
+		matches, legacy := snapshotKeyMatches(r.Route, r.UpstreamIdentity, v.Request, exclusions, r.Key, v.MatchingInput)
+		if !matches {
+			return nil, false, errors.New("revision provenance does not match recording key")
+		}
+		legacyKeys = legacyKeys || legacy
+		if requestStreaming(v.Request) != r.Streaming {
+			return nil, false, errors.New("revision streaming flag disagrees with request")
+		}
+		if err = validateImportedHeaders(v.Headers); err != nil {
+			return nil, false, err
+		}
+		if err = protocol.Validate(r.Route, r.Streaming, v); err != nil {
+			return nil, false, fmt.Errorf("invalid revision: %w", err)
+		}
+		out = append(out, v)
+		if v.ID == r.ActiveRevisionID {
+			copy := v
+			active = &copy
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("read revisions: %w", err)
+	}
+	if active == nil {
+		return nil, false, errors.New("recording references missing active revision")
+	}
+	if string(active.Request) != string(r.Request) || string(active.MatchingInput) != string(r.MatchingInput) {
+		return nil, false, errors.New("recording provenance disagrees with active revision")
+	}
+	return out, legacyKeys, rows.Close()
 }

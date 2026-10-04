@@ -10,12 +10,18 @@ The race-test target also needs a C compiler; the executable itself builds with 
 ```sh
 make build
 cp config.example.json config.local.json
-export OPENAI_API_KEY='your-key'
+export OPENAI_API_KEY='your-key'      # upstream provider keys, used only by the proxy
 export ANTHROPIC_API_KEY='your-key'
 ./bin/replay-proxy -config config.local.json
 ```
 
-Open http://127.0.0.1:8080. Fresh databases start in **Replay** mode and a `Default` collection. Configure the fixed upstream URL for each protocol you use; keep the same URLs and non-secret settings for offline replay. Credentials are optional for replay. `-listen` and `-db` override configuration. `REPLAY_LISTEN`, `REPLAY_DATABASE`, and `REPLAY_{CHAT,RESPONSES,ANTHROPIC}_{URL,API_KEY}` environment overrides are also supported.
+Every `/v1/*` and `/api/*` request needs an access token (see [Authentication](#authentication)). Issue one and open the console login link it prints:
+
+```sh
+./bin/replay-proxy token issue -config config.local.json
+```
+
+Fresh databases start in **Replay** mode and a `Default` collection. Configure the fixed upstream URL for each protocol you use; keep the same URLs and non-secret settings for offline replay. Credentials are optional for replay. `-listen` and `-db` override configuration. `REPLAY_LISTEN`, `REPLAY_DATABASE`, and `REPLAY_{CHAT,RESPONSES,ANTHROPIC}_{URL,API_KEY}` environment overrides are also supported.
 
 Optional [KMS integration](docs/kms.md) loads startup configuration and upstream secrets through the existing KMS Go SDK, with TLS/mTLS and version pins. Start with `config.kms.example.json`. Local files and environment variables work without KMS.
 
@@ -28,6 +34,49 @@ The server exposes:
 | Anthropic Messages | `/v1/messages` |
 
 Upstream URLs are complete endpoints, not base URLs. Caller credentials are not forwarded. Configure credentials through environment variables or a private local JSON file. `api_key_env` names an environment variable; `api_key` supports a literal local-file secret. No credentials are written into recordings or exports. Requests and model outputs themselves may contain sensitive application data.
+
+## Authentication
+
+The proxy requires a signed, stateless JWT on every inference (`/v1/*`) and control API (`/api/*`) request, so only holders of a token can spend the configured upstream keys or read recordings and exports. `/healthz` and the static console pages stay public; the console shows sign-in instructions until it has a token.
+
+**Issuing tokens.** Tokens are issued only by the binary on the server; there is no HTTP endpoint that creates them. Use the same `-config`/`-db` as the server so the same signing key is used:
+
+```sh
+replay-proxy token issue [-config path] [-db path] [-listen addr] [-ttl 2160h] [-subject name]
+```
+
+The token alone is printed to stdout (so `TOKEN=$(replay-proxy token issue)` works); the subject, expiry and console login link go to stderr. `-ttl` defaults to 90 days (`2160h`); `-ttl 0` issues a token without expiry that stays valid until the key is rotated. `-subject` (default `local`) labels the client. Issuing does not need the server to be running.
+
+**Clients.** Use the token as the SDK API key and the proxy as the base URL. The proxy accepts `Authorization: Bearer <token>` (OpenAI SDKs) and `x-api-key: <token>` (Anthropic SDK):
+
+```sh
+export OPENAI_API_KEY="$(replay-proxy token issue -subject my-app)"   # client process, not the proxy
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export ANTHROPIC_API_KEY="$OPENAI_API_KEY"
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+```
+
+These client variables are separate from the proxy's own upstream `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`: the proxy never forwards the caller's token, and upstream requests carry only the configured upstream key. Tokens never enter recordings, history, matching input or exports. Requests without a valid token get HTTP 401 `unauthorized` with `WWW-Authenticate: Bearer`.
+
+**Console.** Open the printed link, `http://<listen>/auth?token=<jwt>` (`/?token=<jwt>` also works). The server validates the token, stores it in an `HttpOnly; SameSite=Strict; Path=/` cookie named `replay_proxy_token` (also `Secure` when the request arrived at the proxy over TLS; forwarded-protocol headers from a reverse proxy are not trusted) whose lifetime matches the token's expiry (400 days for a non-expiring token), and redirects to `/` so the token leaves the address bar. The cookie authorizes only `/api/*`; inference routes require a header token.
+
+**Signing key.** Tokens are HS256 signed with an HMAC key of at least 32 bytes, chosen in this order:
+
+1. `REPLAY_JWT_KEY` environment variable (base64).
+2. `auth.signing_key_file` (a file containing a base64 key), or `auth.signing_key_secret` (a [KMS](docs/kms.md) secret reference, same fields as `api_key_secret`). Configure only one.
+3. Otherwise a random key generated on first start (or first `token issue`) and saved with mode 0600 as `<database>.jwt-key`, e.g. `replay.sqlite.jwt-key`.
+
+Generate a key with `openssl rand -base64 32`. The key is never logged or exposed through the API. Verification accepts only HS256 (`none` and other algorithms are rejected), checks the signature in constant time, requires `iss` = `llm-replay-proxy` and `iat`, and checks `exp`/`nbf`/`iat` with 30 seconds of leeway. Tokens without `exp` are accepted because only `-ttl 0` issues them.
+
+**Revocation and rotation.** Tokens are stateless, so individual tokens cannot be revoked. Rotate the signing key (replace or delete the key file, or change `REPLAY_JWT_KEY`/the KMS secret) and restart the proxy: every outstanding token, including console cookies, becomes invalid. Then issue new tokens.
+
+**Disabling.** `"auth": {"disabled": true}` turns authentication off, and is accepted only when `listen` is a loopback address (`127.0.0.1`, `::1`, `localhost`); startup fails otherwise. The browser smoke-test configuration uses it.
+
+```json
+{
+  "auth": {"signing_key_file": "/etc/replay-proxy/jwt.key"}
+}
+```
 
 ## Recording and replay
 
@@ -49,7 +98,7 @@ rate, completion errors, and separate upstream/replay duration and first-SSE-
 event percentiles. Record-mode requests are cache bypasses. Existing history
 from an older database remains untimed rather than being treated as zero.
 
-Matching uses a versioned SHA-256 input containing the API route, fixed non-secret upstream configuration, and canonical JSON request. Object property order is ignored; array order, string contents, and exact numeric precision are preserved. Streaming and non-streaming requests are distinct. There is no fuzzy matching.
+Matching uses a versioned SHA-256 input containing the API route, fixed non-secret upstream configuration, and canonical JSON request. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
 
 Collection-specific JSON Pointer exclusions remove fields only from matching, never from the forwarded request. For example, `/metadata/run_id` ignores a volatile run identifier. Matching rules are immutable: create a new collection to change exclusions. Use the request comparison panel to inspect changing fields before adding exclusions.
 
@@ -63,7 +112,7 @@ The control panel provides collection management, request history and hit/miss o
 
 Edits are validated before becoming new revisions. Stream structure, completion, and text/final-output agreement are checked. Restoring activates a saved immutable revision without deleting history. Usage remains historical metadata from the original provider response; editing never estimates token counts.
 
-Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions. Import adds collections to the current database. Upstream credentials and runtime configuration are separate. Keep the same non-secret upstream settings when moving recordings between installations.
+Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions; request history is not included. Import adds collections to the current database. Upstream credentials and runtime configuration are separate. Keep the same non-secret upstream settings when moving recordings between installations.
 
 ## Go Common and demo rehearsal
 
@@ -83,6 +132,6 @@ Browser smoke-test instructions are in [tests/browser/README.md](tests/browser/R
 
 Build the frontend before building Go from a checkout that does not include `web/out`. The generated export is included in this repository so `go build ./cmd/replay-proxy` can produce a standalone binary without Node. `make build` regenerates it from source and the lockfile.
 
-The application assumes one trusted local operator. It binds to localhost by default; it has no multi-user authentication. The control API rejects cross-origin browser writes. Avoid exposing the listener to untrusted networks.
+The application assumes trusted operators: every token holder has full access (there are no roles or per-user permissions). It binds to localhost by default and requires a token for inference and the control API. The control API rejects cross-origin browser writes, and there is no CORS support. The server speaks plain HTTP; put it behind a TLS-terminating reverse proxy before exposing it beyond the local machine so tokens are not sent in clear text.
 
 Frontend build configuration follows the [Next.js static export documentation](https://nextjs.org/docs/app/guides/static-exports) and [shadcn Tailwind v4 guidance](https://ui.shadcn.com/docs/tailwind-v4).

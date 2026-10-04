@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"math"
 	"net"
@@ -26,7 +27,7 @@ import (
 const maxImportSize = 1 << 30
 const maxEditSize = 128 << 20
 const maxDelayMultiplier = 1_000_000
-const maxDelayMS = int64(math.MaxInt64 / int64(time.Millisecond))
+const maxDelayMS = int64(24 * time.Hour / time.Millisecond)
 
 type handler struct{ db *store.Store }
 
@@ -66,8 +67,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) analytics(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, "GET")
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
 		return
 	}
 	id, ok := queryID(w, r, "collection_id")
@@ -113,15 +114,15 @@ func (h *handler) analytics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
+	switch {
+	case isRead(r):
 		v, err := h.db.Settings(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
-	case http.MethodPut:
+	case r.Method == http.MethodPut:
 		var v model.Settings
 		if !decodeJSON(w, r, &v) {
 			return
@@ -152,20 +153,20 @@ func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, v)
 	default:
-		methodNotAllowed(w, "GET, PUT")
+		methodNotAllowed(w, "GET, HEAD, PUT")
 	}
 }
 
 func (h *handler) collections(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
+	switch {
+	case isRead(r):
 		v, err := h.db.Collections(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
-	case http.MethodPost:
+	case r.Method == http.MethodPost:
 		var in struct {
 			Name       string   `json:"name"`
 			Exclusions []string `json:"exclusions"`
@@ -189,13 +190,13 @@ func (h *handler) collections(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusCreated, v)
 	default:
-		methodNotAllowed(w, "GET, POST")
+		methodNotAllowed(w, "GET, HEAD, POST")
 	}
 }
 
 func (h *handler) recordings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, "GET")
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
 		return
 	}
 	id, ok := queryID(w, r, "collection_id")
@@ -211,8 +212,8 @@ func (h *handler) recordings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) history(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, "GET")
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
 		return
 	}
 	id, ok := queryID(w, r, "collection_id")
@@ -247,17 +248,15 @@ func (h *handler) history(w http.ResponseWriter, r *http.Request) {
 func (h *handler) recordingAction(w http.ResponseWriter, r *http.Request, p string) {
 	rest := strings.TrimPrefix(p, "/api/recordings/")
 	parts := strings.Split(rest, "/")
-	id, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || id <= 0 {
-		writeError(w, 400, "invalid_request", "invalid recording id")
+	// The path is validated before the method: a path that cannot name a
+	// resource is 404 for every method, and only valid paths report 405.
+	id, ok := parseID(parts[0])
+	if !ok || len(parts) > 2 || (len(parts) == 2 && parts[1] != "edit" && parts[1] != "restore") {
+		writeError(w, 404, "not_found", "endpoint not found")
 		return
 	}
 	if len(parts) == 1 {
 		h.inspect(w, r, id)
-		return
-	}
-	if len(parts) != 2 {
-		writeError(w, 404, "not_found", "endpoint not found")
 		return
 	}
 	switch parts[1] {
@@ -265,14 +264,12 @@ func (h *handler) recordingAction(w http.ResponseWriter, r *http.Request, p stri
 		h.edit(w, r, id)
 	case "restore":
 		h.restore(w, r, id)
-	default:
-		writeError(w, 404, "not_found", "endpoint not found")
 	}
 }
 
 func (h *handler) inspect(w http.ResponseWriter, r *http.Request, id int64) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, "GET")
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
 		return
 	}
 	e, err := h.db.Get(r.Context(), id)
@@ -324,7 +321,7 @@ func (h *handler) edit(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	if raw.BaseRevisionID != e.Revision.ID {
-		writeError(w, 409, "revision_conflict", "recording changed; reload it before saving your edit")
+		writeRevisionConflict(w)
 		return
 	}
 	var revision model.Revision
@@ -354,6 +351,10 @@ func (h *handler) edit(w http.ResponseWriter, r *http.Request, id int64) {
 	}
 	revision.ID, revision.RecordingID, revision.Source, revision.CreatedAt = 0, id, "edit", ""
 	out, err := h.db.PublishIfActive(r.Context(), e.Recording, revision, raw.BaseRevisionID)
+	if errors.Is(err, store.ErrConflict) {
+		writeRevisionConflict(w)
+		return
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -382,6 +383,10 @@ func (h *handler) restore(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	v, err := h.db.RestoreIfActive(r.Context(), id, in.RevisionID, in.BaseRevisionID)
+	if errors.Is(err, store.ErrConflict) {
+		writeRevisionConflict(w)
+		return
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -391,17 +396,13 @@ func (h *handler) restore(w http.ResponseWriter, r *http.Request, id int64) {
 
 func (h *handler) collectionAction(w http.ResponseWriter, r *http.Request, p string) {
 	parts := strings.Split(strings.TrimPrefix(p, "/api/collections/"), "/")
-	if len(parts) != 2 || parts[1] != "export" || r.Method != http.MethodGet {
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, "GET")
-		} else {
-			writeError(w, 404, "not_found", "endpoint not found")
-		}
+	id, ok := parseID(parts[0])
+	if !ok || len(parts) != 2 || parts[1] != "export" {
+		writeError(w, 404, "not_found", "endpoint not found")
 		return
 	}
-	id, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || id <= 0 {
-		writeError(w, 400, "invalid_request", "invalid collection id")
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
 		return
 	}
 	dir, err := os.MkdirTemp("", "llm-replay-export-")
@@ -434,6 +435,10 @@ func (h *handler) importDB(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(path)
 	n, copyErr := io.Copy(f, http.MaxBytesReader(w, r.Body, maxImportSize))
 	closeErr := f.Close()
+	if tooLarge(copyErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("SQLite snapshot exceeds %d bytes", int64(maxImportSize)))
+		return
+	}
 	if copyErr != nil || closeErr != nil {
 		writeError(w, 400, "invalid_import", "could not read SQLite snapshot")
 		return
@@ -443,8 +448,12 @@ func (h *handler) importDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, err := h.db.Import(r.Context(), path)
-	if err != nil {
+	if errors.Is(err, store.ErrInvalidSnapshot) {
 		writeError(w, 422, "invalid_import", err.Error())
+		return
+	}
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, 201, v)
@@ -631,23 +640,53 @@ func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64)
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {
+		if tooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body exceeds %d bytes", limit))
+			return false
+		}
 		writeError(w, 400, "invalid_json", err.Error())
 		return false
 	}
 	if err := d.Decode(&struct{}{}); err != io.EOF {
+		if tooLarge(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body exceeds %d bytes", limit))
+			return false
+		}
 		writeError(w, 400, "invalid_json", "request body must contain one JSON value")
 		return false
 	}
 	return true
 }
+func tooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+// parseID accepts only a canonical positive decimal id: ASCII digits with no
+// sign, whitespace or other prefix that strconv.ParseInt would tolerate.
+func parseID(raw string) (int64, bool) {
+	if raw == "" {
+		return 0, false
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < '0' || raw[i] > '9' {
+			return 0, false
+		}
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	return id, err == nil && id > 0
+}
 func queryID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
-	id, err := strconv.ParseInt(r.URL.Query().Get(name), 10, 64)
-	if err != nil || id <= 0 {
+	id, ok := parseID(r.URL.Query().Get(name))
+	if !ok {
 		writeError(w, 400, "invalid_request", name+" must be a positive integer")
 		return 0, false
 	}
 	return id, true
 }
+
+// isRead reports a GET or HEAD request; every GET endpoint also serves HEAD.
+func isRead(r *http.Request) bool { return r.Method == http.MethodGet || r.Method == http.MethodHead }
 func mutating(m string) bool {
 	return m != http.MethodGet && m != http.MethodHead && m != http.MethodOptions
 }
@@ -680,6 +719,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg}})
 }
+func writeRevisionConflict(w http.ResponseWriter) {
+	writeError(w, 409, "revision_conflict", "recording changed; reload it before retrying")
+}
+
+// writeStoreError maps store sentinels to client errors. Anything else is an
+// internal failure whose text (SQL, file paths) is logged but never returned.
 func writeStoreError(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, 409, "conflict", "resource changed or already exists")
@@ -689,5 +734,6 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, 404, "not_found", "resource not found")
 		return
 	}
-	writeError(w, 500, "internal_error", err.Error())
+	log.Printf("admin: internal error: %v", err)
+	writeError(w, 500, "internal_error", "internal server error")
 }

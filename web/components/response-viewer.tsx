@@ -19,8 +19,13 @@ import {
   type ResponseBlock,
   type ResponseRevision,
 } from "@/lib/response-viewer";
+import { splitFences } from "@/lib/fences";
 
 type Expansion = { open: boolean | null; generation: number };
+// Expand/collapse all stops cascading here so huge payloads stay responsive.
+const EXPAND_ALL_DEPTH = 3;
+const idle: Expansion = { open: null, generation: 0 };
+const ENTRY_PAGE = 100;
 
 function Section({
   title,
@@ -45,7 +50,7 @@ function Section({
       onToggle={(event) => setOpen(event.currentTarget.open)}
       className="rounded-lg border bg-background [&[open]>summary>svg]:rotate-90"
     >
-      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg p-3 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg p-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
         <ChevronRight
           aria-hidden="true"
           className="size-4 shrink-0 transition-transform"
@@ -96,7 +101,7 @@ function JSONTree({
     <Section
       title={label}
       description={`${entries.length} ${Array.isArray(value) ? "items" : "fields"}`}
-      expansion={expansion}
+      expansion={depth < EXPAND_ALL_DEPTH ? expansion : idle}
       defaultOpen={depth === 0}
     >
       {entries.length === 0 ? (
@@ -104,48 +109,79 @@ function JSONTree({
           {Array.isArray(value) ? "[]" : "{}"}
         </code>
       ) : (
-        <dl className="space-y-3">
-          {entries.map(([key, child]) => (
-            <div key={key} className="min-w-0">
-              <dt className="mb-1 break-all font-mono text-xs font-medium text-muted-foreground">
-                {Array.isArray(value) ? `[${key}]` : key}
-              </dt>
-              <dd className="min-w-0 border-l-2 border-muted pl-3">
-                <JSONTree
-                  value={child}
-                  label={key}
-                  depth={depth + 1}
-                  expansion={expansion}
-                />
-              </dd>
-            </div>
-          ))}
-        </dl>
+        <JSONEntries
+          entries={entries}
+          isArray={Array.isArray(value)}
+          depth={depth}
+          expansion={expansion}
+        />
       )}
     </Section>
   );
 }
 
+function JSONEntries({
+  entries,
+  isArray,
+  depth,
+  expansion,
+}: {
+  entries: [string, JSONValue][];
+  isArray: boolean;
+  depth: number;
+  expansion: Expansion;
+}) {
+  const [limit, setLimit] = useState(ENTRY_PAGE);
+  const hidden = entries.length - limit;
+  return (
+    <dl className="space-y-3">
+      {entries.slice(0, limit).map(([key, child]) => (
+        <div key={key} className="min-w-0">
+          <dt className="mb-1 break-all font-mono text-xs font-medium text-muted-foreground">
+            {isArray ? `[${key}]` : key}
+          </dt>
+          <dd className="min-w-0 border-l-2 border-muted pl-3">
+            <JSONTree
+              value={child}
+              label={key}
+              depth={depth + 1}
+              expansion={expansion}
+            />
+          </dd>
+        </div>
+      ))}
+      {hidden > 0 && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setLimit((current) => current + ENTRY_PAGE)}
+        >
+          Show {Math.min(ENTRY_PAGE, hidden)} more ({hidden} hidden)
+        </Button>
+      )}
+    </dl>
+  );
+}
+
 function AnswerText({ text }: { text: string }) {
+  const chunks = useMemo(() => splitFences(text), [text]);
   if (!text)
     return <p className="text-sm italic text-muted-foreground">Empty text</p>;
   // Fenced code is separated for reading; all content stays escaped React text.
   // Never execute HTML or automatically fetch image URLs supplied by a model.
-  const chunks = text.split(/(```[^\n]*\n[\s\S]*?```)/g);
   return (
     <div className="space-y-3 text-sm leading-7">
       {chunks.map((chunk, i) => {
-        const fence = chunk.match(/^```([^\n]*)\n([\s\S]*?)```$/);
-        return fence ? (
+        return chunk.code ? (
           <div
             key={i}
             className="overflow-hidden rounded-lg border bg-muted/50"
           >
             <div className="border-b px-3 py-1 text-xs text-muted-foreground">
-              {fence[1] || "Code"}
+              {chunk.lang || "Code"}
             </div>
             <pre className="max-h-96 overflow-auto p-3 font-mono text-xs leading-6">
-              <code>{fence[2]}</code>
+              <code>{chunk.text}</code>
             </pre>
           </div>
         ) : (
@@ -153,7 +189,7 @@ function AnswerText({ text }: { text: string }) {
             key={i}
             className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
           >
-            {chunk}
+            {chunk.text}
           </p>
         );
       })}
@@ -266,12 +302,12 @@ export function ResponseViewer({
           </Badge>
         )}
       </div>
-      <Tabs defaultValue="readable">
+      <Tabs keepMounted defaultValue="readable">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <TabsList aria-label="Response format">
             <TabsTrigger value="readable">Readable</TabsTrigger>
             <TabsTrigger value="raw">
-              <Braces className="mr-1.5 size-3.5" aria-hidden="true" />
+              <Braces className="size-3.5" aria-hidden="true" />
               Raw
             </TabsTrigger>
             {streaming && (
@@ -279,10 +315,10 @@ export function ResponseViewer({
             )}
           </TabsList>
           <div className="flex gap-1">
-            <Button variant="ghost" size="sm" onClick={() => expand(true)}>
+            <Button variant="ghost" onClick={() => expand(true)}>
               Expand all
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => expand(false)}>
+            <Button variant="ghost" onClick={() => expand(false)}>
               Collapse all
             </Button>
           </div>

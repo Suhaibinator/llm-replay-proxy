@@ -71,8 +71,12 @@ func chatStructure(objects []map[string]any) error {
 		if o == nil {
 			continue
 		}
-		if err := consistentID(&id, o, "id"); err != nil {
-			return err
+		// Azure OpenAI sends prompt and asynchronous content-filter chunks
+		// with an empty id; only nonempty ids identify the completion.
+		if o["id"] != "" {
+			if err := consistentID(&id, o, "id"); err != nil {
+				return err
+			}
 		}
 		choices, _ := asSlice(o["choices"])
 		for _, raw := range choices {
@@ -84,13 +88,18 @@ func chatStructure(objects []map[string]any) error {
 			if err != nil {
 				return err
 			}
-			if finished[idx] {
-				return fmt.Errorf("chat choice %d has data after its finish reason", idx)
-			}
-			if _, ok := asMap(c["delta"]); !ok {
+			delta, ok := asMap(c["delta"])
+			if !ok {
+				if contentFilterOnlyChoice(c) {
+					continue
+				}
 				return fmt.Errorf("chat choice %d delta must be an object", idx)
 			}
-			if finish := c["finish_reason"]; finish != nil {
+			finish := c["finish_reason"]
+			if finished[idx] && (finish != nil || hasEntries(delta)) {
+				return fmt.Errorf("chat choice %d has data after its finish reason", idx)
+			}
+			if finish != nil {
 				if _, err := requiredString(c, "finish_reason"); err != nil {
 					return err
 				}
@@ -101,13 +110,48 @@ func chatStructure(objects []map[string]any) error {
 	return nil
 }
 
+// contentFilterOnlyChoice reports whether a delta-less chat choice carries only
+// Azure content-filter metadata, which may arrive at any point in the stream,
+// including after the choice's finish reason.
+func contentFilterOnlyChoice(c map[string]any) bool {
+	for key, value := range c {
+		switch key {
+		case "index", "content_filter_results", "content_filter_offsets":
+		case "delta", "finish_reason", "logprobs":
+			if value != nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 type responsePart struct {
+	// kind is the content part type: output_text for message text and
+	// reasoning_text for reasoning content (gpt-oss style); other part types
+	// such as refusal are tracked for lifecycle only.
+	kind     string
 	text     strings.Builder
 	sawDelta bool
 	done     bool
 	added    bool
 	closed   bool
 }
+
+// textPartKind maps streamed text events to the content part type they build.
+func textPartKind(eventType string) string {
+	switch eventType {
+	case "response.output_text.delta", "response.output_text.done":
+		return "output_text"
+	case "response.reasoning_text.delta", "response.reasoning_text.done":
+		return "reasoning_text"
+	}
+	return ""
+}
+func isTextPart(kind string) bool { return kind == "output_text" || kind == "reasoning_text" }
+
 type responseItem struct {
 	id            string
 	kind          string
@@ -305,7 +349,8 @@ func responsesStructure(objects []map[string]any) error {
 				}
 				it.argumentsDone = true
 			}
-		case "response.content_part.added", "response.content_part.done", "response.output_text.delta", "response.output_text.done":
+		case "response.content_part.added", "response.content_part.done", "response.output_text.delta", "response.output_text.done",
+			"response.reasoning_text.delta", "response.reasoning_text.done":
 			idx, err := indexField(o, "output_index")
 			if err != nil {
 				return err
@@ -329,6 +374,12 @@ func responsesStructure(objects []map[string]any) error {
 			if p.closed {
 				return fmt.Errorf("content event follows content_part.done")
 			}
+			if kind := textPartKind(typ); kind != "" {
+				if p.kind != "" && p.kind != kind {
+					return fmt.Errorf("%s targets a %s content part", typ, p.kind)
+				}
+				p.kind = kind
+			}
 			switch typ {
 			case "response.content_part.added":
 				if p.added || p.sawDelta || p.done {
@@ -339,16 +390,23 @@ func responsesStructure(objects []map[string]any) error {
 				if !ok {
 					return fmt.Errorf("content_part.added requires a part object")
 				}
-				if part["type"] == "output_text" {
+				p.kind, _ = part["type"].(string)
+				if p.kind == "output_text" {
 					s, ok := part["text"].(string)
 					if !ok {
 						return fmt.Errorf("output_text part requires text")
 					}
 					p.text.WriteString(s)
+				} else if p.kind == "reasoning_text" && part["text"] != nil {
+					s, ok := part["text"].(string)
+					if !ok {
+						return fmt.Errorf("reasoning_text part text must be a string")
+					}
+					p.text.WriteString(s)
 				}
-			case "response.output_text.delta":
+			case "response.output_text.delta", "response.reasoning_text.delta":
 				if p.done {
-					return fmt.Errorf("text delta follows output_text.done")
+					return fmt.Errorf("text delta follows %s.done", p.kind)
 				}
 				s, ok := o["delta"].(string)
 				if !ok {
@@ -356,13 +414,13 @@ func responsesStructure(objects []map[string]any) error {
 				}
 				p.sawDelta = true
 				p.text.WriteString(s)
-			case "response.output_text.done":
+			case "response.output_text.done", "response.reasoning_text.done":
 				if p.done {
-					return fmt.Errorf("duplicate output_text.done")
+					return fmt.Errorf("duplicate %s.done", p.kind)
 				}
 				s, ok := o["text"].(string)
 				if !ok || s != p.text.String() {
-					return fmt.Errorf("output_text.done disagrees with text deltas")
+					return fmt.Errorf("%s.done disagrees with text deltas", p.kind)
 				}
 				p.done = true
 			case "response.content_part.done":
@@ -370,7 +428,12 @@ func responsesStructure(objects []map[string]any) error {
 				if !ok {
 					return fmt.Errorf("content_part.done requires a part object")
 				}
-				if part["type"] == "output_text" {
+				kind, _ := part["type"].(string)
+				if p.kind != "" && kind != p.kind {
+					return fmt.Errorf("content_part.done type %q disagrees with %q", kind, p.kind)
+				}
+				p.kind = kind
+				if kind == "output_text" || (kind == "reasoning_text" && part["text"] != nil) {
 					s, ok := part["text"].(string)
 					if !ok || s != p.text.String() {
 						return fmt.Errorf("content_part.done disagrees with text deltas")
@@ -388,12 +451,18 @@ func responsesStructure(objects []map[string]any) error {
 	}
 	return nil
 }
+
+// terminalItemStatus accepts an absent or null status (several compatible
+// servers send null) and otherwise requires completed.
+func terminalItemStatus(item map[string]any) error {
+	if raw := item["status"]; raw != nil && raw != "completed" {
+		return fmt.Errorf("terminal output item status must be completed")
+	}
+	return nil
+}
 func checkResponseItem(it *responseItem, item map[string]any, final bool) error {
-	if raw, exists := item["status"]; exists {
-		status, ok := raw.(string)
-		if !ok || status != "completed" {
-			return fmt.Errorf("terminal output item status must be completed")
-		}
+	if err := terminalItemStatus(item); err != nil {
+		return err
 	}
 	if it.id != "" {
 		if _, exists := item["id"]; !exists {
@@ -438,8 +507,24 @@ func checkResponseItem(it *responseItem, item map[string]any, final bool) error 
 		return fmt.Errorf("function argument events belong to a non-function output item")
 	}
 	if kind != "message" {
-		if len(it.parts) > 0 {
-			return fmt.Errorf("text deltas belong to a non-message output item")
+		// Message-only rules apply to output_text parts; reasoning items may
+		// stream reasoning_text parts.
+		for _, p := range it.parts {
+			if p.kind == "output_text" || p.kind == "" {
+				return fmt.Errorf("text deltas belong to a non-message output item")
+			}
+		}
+		if content, ok := asSlice(item["content"]); ok {
+			for i, raw := range content {
+				part, _ := asMap(raw)
+				p := it.parts[i]
+				if p == nil || part["type"] != p.kind || !isTextPart(p.kind) {
+					continue
+				}
+				if s, ok := part["text"].(string); ok && s != p.text.String() {
+					return fmt.Errorf("output item %s disagrees with streamed text", p.kind)
+				}
+			}
 		}
 		return nil
 	}
@@ -465,6 +550,9 @@ func checkResponseItem(it *responseItem, item map[string]any, final bool) error 
 				return fmt.Errorf("final text has no corresponding text deltas")
 			}
 			continue
+		}
+		if p.kind != "output_text" {
+			return fmt.Errorf("output_text part was streamed as %q", p.kind)
 		}
 		if s != p.text.String() {
 			return fmt.Errorf("output item text disagrees with text deltas")
@@ -553,7 +641,7 @@ func messagesStructure(objects []map[string]any) error {
 				return err
 			}
 			id := ""
-			if kind == "tool_use" || kind == "server_tool_use" {
+			if anthropicToolKind(kind) {
 				id, _ = block["id"].(string)
 				if prior, ok := toolIDs[id]; ok {
 					return fmt.Errorf("tool blocks %d and %d share id %q", prior, idx, id)
@@ -586,7 +674,7 @@ func messagesStructure(objects []map[string]any) error {
 				}
 				field = "text"
 			case "input_json_delta":
-				if block.kind != "tool_use" && block.kind != "server_tool_use" {
+				if !anthropicToolKind(block.kind) {
 					return fmt.Errorf("input JSON delta targets a non-tool block")
 				}
 				field = "partial_json"
@@ -616,7 +704,9 @@ func messagesStructure(objects []map[string]any) error {
 			if block == nil || !block.open {
 				return fmt.Errorf("stop targets an unopened block")
 			}
-			if block.hasArguments {
+			// Parameterless tools stream only an empty partial_json; the
+			// object input from content_block_start then stands.
+			if block.hasArguments && block.arguments.Len() > 0 {
 				if err := validArguments(block.arguments.String()); err != nil {
 					return err
 				}
@@ -674,8 +764,11 @@ func bodyStructure(route, body string) error {
 			switch content := message["content"].(type) {
 			case string:
 			case nil:
-				if message["tool_calls"] == nil && message["function_call"] == nil && message["refusal"] == nil {
-					return fmt.Errorf("chat choice has neither content, tools nor refusal")
+				// Audio responses and responses truncated by the token limit
+				// may legitimately carry null content.
+				if message["tool_calls"] == nil && message["function_call"] == nil && message["refusal"] == nil &&
+					message["audio"] == nil && c["finish_reason"] != "length" {
+					return fmt.Errorf("chat choice has neither content, tools, refusal nor audio")
 				}
 			case []any:
 				for _, part := range content {
@@ -746,7 +839,7 @@ func bodyStructure(route, body string) error {
 			if err := anthropicTool(part); err != nil {
 				return err
 			}
-			if part["type"] == "tool_use" || part["type"] == "server_tool_use" {
+			if kind, _ := part["type"].(string); anthropicToolKind(kind) {
 				id, _ := part["id"].(string)
 				if toolIDs[id] {
 					return fmt.Errorf("duplicate tool use id %q", id)
@@ -785,11 +878,8 @@ func bodyStructure(route, body string) error {
 				}
 			}
 			if item["type"] == "message" || item["type"] == "function_call" {
-				if raw, exists := item["status"]; exists {
-					status, ok := raw.(string)
-					if !ok || status != "completed" {
-						return fmt.Errorf("terminal output item status must be completed")
-					}
+				if err := terminalItemStatus(item); err != nil {
+					return err
 				}
 			}
 		}
@@ -821,8 +911,14 @@ func responseFunction(item map[string]any) error {
 	}
 	return functionArguments(item)
 }
+
+// anthropicToolKind reports whether a content block type is a tool call whose
+// input streams as input_json_delta.
+func anthropicToolKind(kind string) bool {
+	return kind == "tool_use" || kind == "server_tool_use" || kind == "mcp_tool_use"
+}
 func anthropicTool(block map[string]any) error {
-	if block["type"] != "tool_use" && block["type"] != "server_tool_use" {
+	if kind, _ := block["type"].(string); !anthropicToolKind(kind) {
 		return nil
 	}
 	if _, err := requiredString(block, "id"); err != nil {

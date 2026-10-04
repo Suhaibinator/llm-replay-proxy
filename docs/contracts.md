@@ -4,6 +4,26 @@ The embedded frontend uses these same-origin endpoints. All mutations require a
 same-origin browser request; local command-line clients without an Origin header
 are supported. Errors have the shape `{ "error": { "code": "...", "message": "..." } }`.
 
+## Authentication
+
+Every `/api/*` and `/v1/*` request requires a JWT issued by
+`replay-proxy token issue` (see the README's Authentication section). It is
+accepted as `Authorization: Bearer <jwt>` or `x-api-key: <jwt>` on all of these
+routes, and as the `replay_proxy_token` cookie on `/api/*` only. A missing,
+invalid, or expired token returns HTTP 401 with `WWW-Authenticate: Bearer` and
+`{ "error": { "code": "unauthorized", "message": "..." } }`; the frontend shows
+sign-in instructions when it receives this. `/healthz` and the static console
+pages are public. `auth.disabled` (loopback listeners only) removes the
+requirement.
+
+`GET /auth?token=<jwt>` (also `GET /?token=<jwt>`) is the console login link.
+It validates the token, sets the `HttpOnly; SameSite=Strict; Path=/` cookie with
+a `Max-Age` matching the token's `exp`, and answers `303 See Other` to `/`. An
+invalid token returns a plain-text 401 and no cookie. There is no API that
+issues, refreshes, lists, or revokes tokens.
+
+## Endpoints
+
 | Endpoint | Method | Request / result |
 | --- | --- | --- |
 | `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `delay_multiplier` |
@@ -14,9 +34,24 @@ are supported. Errors have the shape `{ "error": { "code": "...", "message": "..
 | `/api/recordings/N/restore` | POST | `{revision_id, base_revision_id}` |
 | `/api/history?collection_id=N` | GET | History including exact `request_text`; optional `limit` up to 1000 |
 | `/api/analytics?collection_id=N&from=RFC3339&to=RFC3339` | GET | Complete history aggregates, UTC series, hit rate, and source-specific timing percentiles |
-| `/api/collections/N/export` | GET | SQLite snapshot attachment |
-| `/api/import` | POST | Raw SQLite snapshot bytes |
+| `/api/collections/N/export` | GET | SQLite snapshot attachment: the collection, recordings, and revisions; request history is never included |
+| `/api/import` | POST | Raw SQLite snapshot bytes; 422 `invalid_import` for an invalid snapshot |
 | `/api/compare` | POST | `{recording_id, request}` or `{recording_id, history_id}` |
+
+Every GET endpoint also accepts HEAD. Path ids must be plain positive decimal
+digits (no sign or whitespace). A path that does not name an endpoint or
+resource, including a malformed id, is 404 `not_found` for every method; an
+unsupported method on a valid path is 405 `method_not_allowed` with an `Allow`
+header. A body over the endpoint's size limit is 413 `request_too_large`.
+Unexpected server failures are 500 `internal_error` with a generic message; the
+details are logged by the server, not returned.
+
+Snapshot import rejects, with 422 and nothing imported, any snapshot that is
+not a readable replay-proxy SQLite database or that violates store invariants,
+including blank (after trimming) collection names and `created_at` values that
+are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions,
+revision headers, or events are stored as empty values. Request history in a
+snapshot is ignored.
 
 Analytics uses a half-open `[from,to)` interval, defaults to the last 24 hours,
 and accepts ranges up to 366 days. `lifetime_total` is independent of that
@@ -25,7 +60,8 @@ ranges. A timing percentile is null with zero samples when no measurement is
 available; upstream and replay timings are never combined.
 
 Edits and restores require the currently active `base_revision_id`. A stale
-revision produces HTTP 409 `revision_conflict`; reload before retrying. Advanced
+revision, including one activated concurrently while the request is processed,
+produces HTTP 409 `revision_conflict`; reload before retrying. Advanced
 edits change response bodies/events; response status, headers, original request,
 and matching provenance remain immutable.
 
@@ -38,11 +74,45 @@ route mismatch.
 `Event.data` contains a complete raw SSE frame, including event/data lines and its
 blank delimiter. `Event.offset_ms` is the relative capture time. Edits must retain
 valid event order, identities, completion, and agreement with final output.
+Frames follow the SSE field rules: a line without a colon is a field with an
+empty value (a bare `data` line), and a UTF-8 byte order mark is stripped from
+the first frame only.
+
+The plain-text editor only rewrites existing text; it never inserts events or
+adjusts metadata. A recording therefore reports an unavailability reason, and
+needs an advanced edit, when it contains tool calls, reasoning, refusals, audio,
+multiple choices/parts/blocks, non-empty annotations, citations, or logprobs
+(including any `*.annotation.added` Responses event), or a Responses stream
+with no `response.output_text.delta` event to rewrite.
+
+## Matching keys
+
+Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
+exclusions also matches as `[]`. Earlier builds canonicalized empty arrays as
+`null` under the same canonical version, so `{"tools":[]}` and
+`{"tools":null}` shared a recording. Opening a database runs a one-time,
+transactional re-key (recorded as `rekey-empty-arrays-1` in `store_migrations`)
+that recomputes every recording's key and every revision's matching input from
+the stored request, route, upstream identity, and collection exclusions:
+
+- A revision whose request now has a different key than its recording's
+  active request moves to the recording for that key; if none exists, one is
+  created with the newest such revision active. Requests that differ only in
+  `[]` versus `null` therefore replay what was recorded for that exact shape.
+- When several recordings now share a key (possible only with array-element
+  exclusions), the one with the newest active revision keeps serving; the
+  others' revisions become its inactive history and the emptied recordings are
+  removed. No revision is deleted. History rows keep their original keys.
+
+Snapshots exported by earlier builds still import: provenance is accepted when
+it matches either the current key or the earlier empty-array-as-`null` key, and
+any collection with earlier keys gets the same re-key inside the import
+transaction. Provenance that matches neither is rejected as before.
 
 Shared Go data types are in `internal/model`. Storage exposes atomic
 `PublishIfActive` and `RestoreIfActive` operations for optimistic editing, while
 live successful recordings use `Publish`. Network reads, replay delays, and
 snapshot validation happen outside publication transactions.
 
-KMS bootstrap settings, identity tokens, binding keys, and upstream credentials
-are not part of this control API. See [KMS configuration](kms.md).
+KMS bootstrap settings, identity tokens, binding keys, upstream credentials, and
+the JWT signing key are not part of this control API. See [KMS configuration](kms.md).

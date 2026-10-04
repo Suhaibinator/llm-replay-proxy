@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/local/llm-replay-proxy/integration/rehearsal"
@@ -17,7 +18,11 @@ func main() {
 	workflow := flag.String("workflow", "text", "text or tools")
 	prompt := flag.String("prompt", "Reply with the word ready.", "prompt sent through Go Common")
 	timeout := flag.Duration("timeout", 30*time.Second, "whole rehearsal timeout")
+	token := flag.String("token", "", "access token from `replay-proxy token issue` (default $REPLAY_PROXY_API_KEY)")
 	flag.Parse()
+	if *token == "" {
+		*token = os.Getenv("REPLAY_PROXY_API_KEY")
+	}
 
 	api, err := rehearsal.API(*apiName)
 	if err != nil {
@@ -25,7 +30,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	client, err := rehearsal.New(ctx, *baseURL, *model)
+	client, err := rehearsal.NewWithToken(ctx, *baseURL, *model, *token)
 	if err != nil {
 		log.Fatal(err)
 	}
