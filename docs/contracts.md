@@ -14,9 +14,24 @@ are supported. Errors have the shape `{ "error": { "code": "...", "message": "..
 | `/api/recordings/N/restore` | POST | `{revision_id, base_revision_id}` |
 | `/api/history?collection_id=N` | GET | History including exact `request_text`; optional `limit` up to 1000 |
 | `/api/analytics?collection_id=N&from=RFC3339&to=RFC3339` | GET | Complete history aggregates, UTC series, hit rate, and source-specific timing percentiles |
-| `/api/collections/N/export` | GET | SQLite snapshot attachment |
-| `/api/import` | POST | Raw SQLite snapshot bytes |
+| `/api/collections/N/export` | GET | SQLite snapshot attachment: the collection, recordings, and revisions; request history is never included |
+| `/api/import` | POST | Raw SQLite snapshot bytes; 422 `invalid_import` for an invalid snapshot |
 | `/api/compare` | POST | `{recording_id, request}` or `{recording_id, history_id}` |
+
+Every GET endpoint also accepts HEAD. Path ids must be plain positive decimal
+digits (no sign or whitespace). A path that does not name an endpoint or
+resource, including a malformed id, is 404 `not_found` for every method; an
+unsupported method on a valid path is 405 `method_not_allowed` with an `Allow`
+header. A body over the endpoint's size limit is 413 `request_too_large`.
+Unexpected server failures are 500 `internal_error` with a generic message; the
+details are logged by the server, not returned.
+
+Snapshot import rejects, with 422 and nothing imported, any snapshot that is
+not a readable replay-proxy SQLite database or that violates store invariants,
+including blank (after trimming) collection names and `created_at` values that
+are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions,
+revision headers, or events are stored as empty values. Request history in a
+snapshot is ignored.
 
 Analytics uses a half-open `[from,to)` interval, defaults to the last 24 hours,
 and accepts ranges up to 366 days. `lifetime_total` is independent of that
@@ -25,7 +40,8 @@ ranges. A timing percentile is null with zero samples when no measurement is
 available; upstream and replay timings are never combined.
 
 Edits and restores require the currently active `base_revision_id`. A stale
-revision produces HTTP 409 `revision_conflict`; reload before retrying. Advanced
+revision, including one activated concurrently while the request is processed,
+produces HTTP 409 `revision_conflict`; reload before retrying. Advanced
 edits change response bodies/events; response status, headers, original request,
 and matching provenance remain immutable.
 
