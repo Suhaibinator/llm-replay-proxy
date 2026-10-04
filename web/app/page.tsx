@@ -58,6 +58,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ResponseViewer } from "@/components/response-viewer";
+import { AuthGate, notifyAuthRequired } from "@/components/auth-required";
 import { cn } from "@/lib/utils";
 
 type Collection = {
@@ -189,6 +190,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
+  if (res.status === 401) notifyAuthRequired();
   if (!res.ok) {
     let msg = `Request failed (${res.status})`,
       code = "request_failed";
@@ -2086,4 +2088,10 @@ function Data({
     </section>
   );
 }
-export default App;
+export default function Page() {
+  return (
+    <AuthGate>
+      <App />
+    </AuthGate>
+  );
+}
