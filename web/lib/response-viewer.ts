@@ -194,10 +194,12 @@ function contentBlocks(
         raw,
       };
     if (["thinking", "reasoning", "redacted_thinking"].includes(type)) {
-      const summaries = array(part.summary)
-        .map((x) => str(object(x).text))
-        .filter(Boolean)
-        .join("\n\n");
+      const texts = (items: JSONValue | undefined) =>
+        array(items)
+          .map((x) => str(object(x).text))
+          .filter(Boolean)
+          .join("\n\n");
+      const summaries = texts(part.summary) || texts(part.content);
       return {
         kind: "reasoning",
         title:
@@ -318,6 +320,9 @@ function streamedChat(frames: ParsedEvent[]): JSONObject {
   const result: JSONObject = { choices: [] },
     choices = new Map<string, JSONObject>();
   const tools = new Map<string, Map<string, JSONObject>>();
+  const logprobs = new Map<string, JSONValue[]>();
+  const fresh = (fields: JSONObject = {}): JSONObject =>
+    Object.assign(Object.create(null), fields);
   for (const frame of frames) {
     const o = object(frame.value);
     for (const key of ["id", "model", "created", "usage", "system_fingerprint"])
@@ -328,7 +333,10 @@ function streamedChat(frames: ParsedEvent[]): JSONObject {
         delta = object(choice.delta);
       let output = choices.get(key);
       if (!output) {
-        output = { index: choice.index ?? 0, message: { role: "assistant" } };
+        output = fresh({
+          index: choice.index ?? 0,
+          message: fresh({ role: "assistant" }),
+        });
         choices.set(key, output);
       }
       const message = object(output.message);
@@ -343,20 +351,39 @@ function streamedChat(frames: ParsedEvent[]): JSONObject {
         else if (delta[field] !== undefined && delta[field] !== null)
           message[field] = [...array(message[field]), ...array(delta[field])];
       }
-      for (const [field, value] of Object.entries(delta))
+      for (const [field, value] of Object.entries(delta)) {
         if (
-          ![
+          [
             "content",
             "refusal",
             "reasoning_content",
             "reasoning",
             "tool_calls",
             "function_call",
-          ].includes(field)
+          ].includes(field) ||
+          value === null ||
+          value === undefined
         )
-          message[field] = value;
-      if (choice.finish_reason !== undefined)
+          continue;
+        // Streamed list fields (annotations, reasoning_details) arrive in
+        // pieces; audio streams its transcript and data as string chunks.
+        if (Array.isArray(value))
+          message[field] = [...array(message[field]), ...value];
+        else if (field === "audio" && typeof value === "object") {
+          const target = fresh({ ...object(message[field]) });
+          for (const [name, part] of Object.entries(object(value)))
+            target[name] =
+              typeof part === "string" && ["data", "transcript"].includes(name)
+                ? str(target[name]) + part
+                : part;
+          message[field] = target;
+        } else message[field] = value;
+      }
+      if (choice.finish_reason !== undefined && choice.finish_reason !== null)
         output.finish_reason = choice.finish_reason;
+      const tokenLogprobs = array(object(choice.logprobs).content);
+      if (tokenLogprobs.length)
+        logprobs.set(key, [...(logprobs.get(key) || []), ...tokenLogprobs]);
       let calls = tools.get(key);
       if (!calls) {
         calls = new Map();
@@ -375,26 +402,34 @@ function streamedChat(frames: ParsedEvent[]): JSONObject {
             fragment.index === "legacy" ? "legacy" : index(fragment.index);
         let call = calls.get(toolIndex);
         if (!call) {
-          call = {};
+          call = fresh();
           calls.set(toolIndex, call);
         }
+        // Later chunks often repeat id/type/name as null; keep the first value.
+        const present = (value: JSONValue) =>
+          value !== null && value !== undefined && value !== "";
         for (const [field, value] of Object.entries(fragment))
-          if (!["function", "custom"].includes(field)) call[field] = value;
+          if (!["function", "custom"].includes(field) && present(value))
+            call[field] = value;
         for (const field of ["function", "custom"])
           if (fragment[field]) {
-            const target = object(call[field]),
+            const target = call[field] ? object(call[field]) : fresh(),
               part = object(fragment[field]);
             for (const [name, value] of Object.entries(part))
-              target[name] = ["arguments", "input"].includes(name)
-                ? str(target[name]) + str(value)
-                : value;
+              if (["arguments", "input"].includes(name))
+                target[name] = str(target[name]) + str(value);
+              else if (present(value)) target[name] = value;
             call[field] = target;
           }
       }
       if (calls.size) message.tool_calls = [...calls.values()];
     }
   }
-  result.choices = [...choices.values()];
+  for (const [key, content] of logprobs)
+    choices.get(key)!.logprobs = fresh({ content });
+  result.choices = [...choices.entries()]
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([, choice]) => choice);
   return result;
 }
 function streamedMessages(frames: ParsedEvent[]): JSONObject {
@@ -435,7 +470,7 @@ function streamedMessages(frames: ParsedEvent[]): JSONObject {
   result.content = [...blocks.entries()]
     .sort(([a], [b]) => Number(a) - Number(b))
     .map(([key, block]) =>
-      inputs.has(key)
+      inputs.get(key)
         ? { ...block, input: argumentsValue(inputs.get(key)!) }
         : block,
     );

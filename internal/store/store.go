@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_collection_created ON history(collection_id,id DESC);
 CREATE INDEX IF NOT EXISTS revisions_recording ON revisions(recording_id,id DESC);
+CREATE INDEX IF NOT EXISTS history_collection_time ON history(collection_id,created_at);
 `
 
 func Open(path string) (*Store, error) {
@@ -560,7 +561,12 @@ func (s *Store) Analytics(ctx context.Context, cid int64, from, to time.Time) (m
 	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM history WHERE collection_id=?", cid).Scan(&a.LifetimeTotal); err != nil {
 		return a, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT outcome,source,duration_ms,first_event_ms,created_at,lookup_outcome FROM history WHERE collection_id=? ORDER BY id`, cid)
+	// created_at is RFC3339 text, possibly with a non-UTC offset from imports,
+	// so it isn't strictly ordered as a string. Narrow the scan by date prefix
+	// with a margin wider than any UTC offset; the exact range check is below.
+	lower := from.UTC().AddDate(0, 0, -1).Format(time.DateOnly)
+	upper := to.UTC().AddDate(0, 0, 2).Format(time.DateOnly)
+	rows, err := s.db.QueryContext(ctx, `SELECT outcome,source,duration_ms,first_event_ms,created_at,lookup_outcome FROM history WHERE collection_id=? AND created_at>=? AND created_at<? ORDER BY id`, cid, lower, upper)
 	if err != nil {
 		return model.Analytics{}, err
 	}

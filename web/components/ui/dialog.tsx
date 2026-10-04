@@ -22,7 +22,7 @@ export function DialogContent({
       >
         {children}
         <D.Close
-          className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground hover:bg-muted"
+          className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
           aria-label="Close"
         >
           <X className="size-4" />

@@ -26,7 +26,7 @@ import (
 const maxImportSize = 1 << 30
 const maxEditSize = 128 << 20
 const maxDelayMultiplier = 1_000_000
-const maxDelayMS = int64(math.MaxInt64 / int64(time.Millisecond))
+const maxDelayMS = int64(24 * time.Hour / time.Millisecond)
 
 type handler struct{ db *store.Store }
 

@@ -23,6 +23,7 @@ import {
   Search,
   Settings2,
   Upload,
+  X,
   XCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +43,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ResponseViewer } from "@/components/response-viewer";
 import { cn } from "@/lib/utils";
 
@@ -187,15 +201,25 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return res.status === 204 ? (undefined as T) : res.json();
 }
-const date = (s: string) =>
-  s
-    ? new Intl.DateTimeFormat(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      }).format(new Date(s))
-    : "—";
+const dateFormat = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const utcDayFormat = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});
+const formatDate = (format: Intl.DateTimeFormat, s: string) => {
+  if (!s) return "—";
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : format.format(d);
+};
+const date = (s: string) => formatDate(dateFormat, s);
+const bucketLabel = (s: string, range: string) =>
+  range === "24h" ? date(s) : `${formatDate(utcDayFormat, s)} (UTC)`;
 const pretty = (v: unknown) => JSON.stringify(v, null, 2);
 const editableRevision = (revision: Revision) => ({
   status: revision.status,
@@ -203,6 +227,12 @@ const editableRevision = (revision: Revision) => ({
   body: revision.body,
   events: revision.events,
 });
+const download = (href: string) => {
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = "";
+  link.click();
+};
 const shortKey = (s: string) => (s ? `${s.slice(0, 8)}…${s.slice(-5)}` : "—");
 function Outcome({ value }: { value: string }) {
   const hit = /hit|recorded|success/i.test(value),
@@ -254,6 +284,29 @@ function AnalyticsDashboard({
   onRange: (range: string) => void;
 }) {
   const max = Math.max(1, ...analytics.series.map((p) => p.total));
+  // One tab stop for the chart; arrow keys move between buckets.
+  const [focusedBar, setFocusedBar] = useState(-1);
+  const activeBar =
+    focusedBar >= 0 && focusedBar < analytics.series.length
+      ? focusedBar
+      : analytics.series.length - 1;
+  const moveBar = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const last = analytics.series.length - 1;
+    const next =
+      event.key === "ArrowLeft"
+        ? Math.max(0, activeBar - 1)
+        : event.key === "ArrowRight"
+          ? Math.min(last, activeBar + 1)
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? last
+              : null;
+    if (next === null) return;
+    event.preventDefault();
+    setFocusedBar(next);
+    (event.currentTarget.children[next] as HTMLElement | undefined)?.focus();
+  };
   const pct =
     analytics.hit_rate == null
       ? "—"
@@ -276,28 +329,38 @@ function AnalyticsDashboard({
           </CardDescription>
         </div>
         <div className="flex flex-wrap gap-2">
-          <select
-            aria-label="Analytics collection"
-            className="h-9 rounded-lg border bg-background px-3 text-sm"
-            value={collectionID}
-            onChange={(e) => onCollection(Number(e.target.value))}
+          <Select
+            disabled={!collections.length}
+            value={collectionID ? String(collectionID) : ""}
+            onValueChange={(v) => onCollection(Number(v))}
           >
-            {collections.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="Analytics date range"
-            className="h-9 rounded-lg border bg-background px-3 text-sm"
-            value={range}
-            onChange={(e) => onRange(e.target.value)}
-          >
-            <option value="24h">Last 24 hours</option>
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-          </select>
+            <SelectTrigger
+              aria-label="Analytics collection"
+              className="w-auto min-w-36"
+            >
+              <SelectValue placeholder="Select collection" />
+            </SelectTrigger>
+            <SelectContent>
+              {collections.map((c) => (
+                <SelectItem key={c.id} value={String(c.id)}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={range} onValueChange={onRange}>
+            <SelectTrigger
+              aria-label="Analytics date range"
+              className="w-auto min-w-36"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="24h">Last 24 hours</SelectItem>
+              <SelectItem value="7d">Last 7 days</SelectItem>
+              <SelectItem value="30d">Last 30 days</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -326,29 +389,48 @@ function AnalyticsDashboard({
                 No traffic in this range
               </div>
             ) : (
-              <div
-                className="flex h-32 items-end gap-1 rounded-lg border px-3 pt-3"
-                role="img"
-                aria-label="Request volume over time"
-              >
-                {analytics.series.map((p) => (
-                  <div
-                    key={p.start}
-                    className="group relative min-w-0 flex-1 rounded-t bg-primary/75"
-                    style={{
-                      height:
-                        p.total === 0
-                          ? 0
-                          : `${Math.max(3, (p.total / max) * 100)}%`,
-                    }}
-                    title={`${date(p.start)}: ${p.total} requests`}
-                  >
-                    <span className="sr-only">
-                      {date(p.start)}: {p.total} requests
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <TooltipProvider delayDuration={0}>
+                <div
+                  className="flex h-32 items-end gap-1 rounded-lg border px-3 pt-3"
+                  role="group"
+                  aria-label="Request volume over time. Use arrow keys to move between buckets."
+                  onKeyDown={moveBar}
+                >
+                  {analytics.series.map((p, i) => (
+                    <Tooltip key={p.start}>
+                      <TooltipTrigger asChild>
+                        {/* Full-height target so empty buckets still have a tooltip. */}
+                        <div
+                          role="img"
+                          tabIndex={i === activeBar ? 0 : -1}
+                          aria-label={`${bucketLabel(p.start, range)}: ${p.total} requests, ${p.hits} hits, ${p.misses} misses, ${p.errors} errors`}
+                          onFocus={() => setFocusedBar(i)}
+                          className="group flex h-full min-w-0 flex-1 items-end rounded-t outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <div
+                            className="w-full rounded-t bg-primary/75 group-hover:bg-primary group-focus-visible:bg-primary"
+                            style={{
+                              height:
+                                p.total === 0
+                                  ? 0
+                                  : `${Math.max(3, (p.total / max) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        <p className="font-medium">
+                          {bucketLabel(p.start, range)}
+                        </p>
+                        <p>
+                          {p.total} requests · {p.hits} hits · {p.misses} misses
+                          · {p.errors} errors
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                </div>
+              </TooltipProvider>
             )}
           </div>
           <div className="overflow-x-auto">
@@ -383,7 +465,7 @@ function AnalyticsDashboard({
           </div>
         </div>
         <details>
-          <summary className="cursor-pointer text-xs text-muted-foreground">
+          <summary className="cursor-pointer rounded-sm text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">
             Accessible traffic table
           </summary>
           <div className="mt-2 max-h-48 overflow-auto">
@@ -440,7 +522,13 @@ function App() {
     [pointers, setPointers] = useState("");
   const [editText, setEditText] = useState(""),
     [advanced, setAdvanced] = useState(""),
-    [compare, setCompare] = useState<Diff[] | null>(null);
+    [compare, setCompare] = useState<Diff[] | null>(null),
+    [inspectError, setInspectError] = useState(""),
+    [createError, setCreateError] = useState(""),
+    [revising, setRevising] = useState(false),
+    [drafts, setDrafts] = useState<
+      Partial<Record<"first_event_delay_ms" | "delay_multiplier", string>>
+    >({});
   const fileRef = useRef<HTMLInputElement>(null);
   const inspectTriggerRef = useRef<HTMLButtonElement | null>(null);
   const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -450,6 +538,11 @@ function App() {
   const inspectVersion = useRef(0);
   const compareVersion = useRef(0);
   const settingsRef = useRef(settings);
+  const confirmedSettings = useRef(settings);
+  const pendingPatches = useRef<Partial<Settings>[]>([]);
+  const settingsVersion = useRef(0);
+  const busyCount = useRef(0);
+  const toastTimer = useRef(0);
   const settingsQueue = useRef(Promise.resolve());
   const pendingWrites = useRef(0);
   const analyticsCollectionRef = useRef(analyticsCollection);
@@ -461,19 +554,41 @@ function App() {
   );
   const notify = (s: string) => {
     setToast(s);
-    window.setTimeout(() => setToast(""), 3000);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(""), 3000);
+  };
+  const startBusy = () => {
+    busyCount.current += 1;
+    setBusy(true);
+  };
+  const endBusy = () => {
+    busyCount.current -= 1;
+    if (!busyCount.current) setBusy(false);
   };
   const analyticsURL = useCallback((collectionID: number, range: string) => {
-    const hours = range === "24h" ? 24 : range === "7d" ? 168 : 720;
-    const to = new Date(),
-      from = new Date(to.getTime() - hours * 3600000);
+    const to = new Date();
+    // Align to the server's UTC buckets so the first bar is a full bucket.
+    const from =
+      range === "24h"
+        ? new Date(Math.floor(to.getTime() / 3600000) * 3600000 - 23 * 3600000)
+        : new Date(
+            Date.UTC(
+              to.getUTCFullYear(),
+              to.getUTCMonth(),
+              to.getUTCDate() - (range === "7d" ? 6 : 29),
+            ),
+          );
     return `/api/analytics?collection_id=${collectionID}&from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`;
   }, []);
-  const fail = (e: unknown) =>
-    setError(e instanceof Error ? e.message : "Something went wrong");
+  const message = (e: unknown) =>
+    e instanceof Error ? e.message : "Something went wrong";
+  const fail = (e: unknown) => setError(message(e));
+  const failInspect = (e: unknown) => setInspectError(message(e));
   const refreshAnalytics = useCallback(
     async (collectionID: number, range: string, reportError = true) => {
-      const version = ++analyticsVersion.current;
+      const version = reportError
+        ? ++analyticsVersion.current
+        : analyticsVersion.current;
       try {
         const value = await api<Analytics>(analyticsURL(collectionID, range));
         if (
@@ -488,24 +603,41 @@ function App() {
         )
           setActiveLifetime(value.lifetime_total);
       } catch (e) {
-        if (reportError && version === analyticsVersion.current) fail(e);
+        if (
+          reportError &&
+          version === analyticsVersion.current &&
+          analyticsCollectionRef.current === collectionID &&
+          analyticsRangeRef.current === range
+        ) {
+          setAnalytics(emptyAnalytics);
+          fail(e);
+        }
       }
     },
     [analyticsURL],
   );
   const load = useCallback(async () => {
     const version = ++loadVersion.current;
-    setBusy(true);
+    const settingsAtStart = settingsVersion.current;
+    startBusy();
     setError("");
     try {
-      const [cs, ss] = await Promise.all([
+      const [cs, fetched] = await Promise.all([
         api<Collection[]>("/api/collections"),
         api<Settings>("/api/settings"),
       ]);
       if (version !== loadVersion.current) return;
       setCollections(cs);
-      setSettings(ss);
-      settingsRef.current = ss;
+      // A settings write queued after this load started is newer than `fetched`.
+      if (
+        !pendingWrites.current &&
+        settingsVersion.current === settingsAtStart
+      ) {
+        confirmedSettings.current = fetched;
+        settingsRef.current = fetched;
+        setSettings(fetched);
+      }
+      const ss = settingsRef.current;
       if (!analyticsCollectionRef.current) {
         analyticsCollectionRef.current = ss.active_collection_id;
         setAnalyticsCollection(ss.active_collection_id);
@@ -544,7 +676,7 @@ function App() {
     } catch (e) {
       if (version === loadVersion.current) fail(e);
     } finally {
-      if (version === loadVersion.current) setBusy(false);
+      endBusy();
     }
   }, [refreshAnalytics]);
   useEffect(() => {
@@ -555,7 +687,13 @@ function App() {
       const cid = settingsRef.current.active_collection_id;
       const analyticsCID = analyticsCollectionRef.current || cid;
       const analyticsWindow = analyticsRangeRef.current;
-      if (!cid || pendingWrites.current || pollInFlight.current) return;
+      if (
+        !cid ||
+        document.hidden ||
+        pendingWrites.current ||
+        pollInFlight.current
+      )
+        return;
       pollInFlight.current = true;
       try {
         const version = collectionVersion.current,
@@ -597,7 +735,7 @@ function App() {
   }, [analyticsURL, refreshAnalytics]);
   async function loadCollection(collectionID: number) {
     const version = ++collectionVersion.current;
-    setBusy(true);
+    startBusy();
     setRecordings([]);
     setHistory([]);
     try {
@@ -620,22 +758,29 @@ function App() {
         setActiveLifetime(totals.lifetime_total);
       }
     } finally {
-      if (version === collectionVersion.current) setBusy(false);
+      endBusy();
     }
   }
   function saveSettings(patch: Partial<Settings>) {
-    const previous = settingsRef.current;
-    const next = { ...previous, ...patch };
-    settingsRef.current = next;
-    setSettings(next);
+    settingsVersion.current += 1;
+    pendingPatches.current.push(patch);
+    const optimistic = { ...settingsRef.current, ...patch };
+    settingsRef.current = optimistic;
+    setSettings(optimistic);
     pendingWrites.current += 1;
     setSaving(true);
     const task = settingsQueue.current.then(async () => {
+      // Build from confirmed server state so a failed earlier write
+      // doesn't leak into this one.
+      const previous = confirmedSettings.current;
+      const next = { ...previous, ...patch };
+      let failed = false;
       try {
         await api("/api/settings", {
           method: "PUT",
           body: JSON.stringify(next),
         });
+        confirmedSettings.current = next;
         if (next.active_collection_id !== previous.active_collection_id) {
           await loadCollection(next.active_collection_id);
           analyticsCollectionRef.current = next.active_collection_id;
@@ -649,9 +794,18 @@ function App() {
           notify("Settings saved");
         }
       } catch (e) {
-        await load();
+        failed = true;
         fail(e);
       } finally {
+        pendingPatches.current.splice(pendingPatches.current.indexOf(patch), 1);
+        if (failed) {
+          const rolledBack = pendingPatches.current.reduce<Settings>(
+            (current, pending) => ({ ...current, ...pending }),
+            confirmedSettings.current,
+          );
+          settingsRef.current = rolledBack;
+          setSettings(rolledBack);
+        }
         pendingWrites.current -= 1;
         if (pendingWrites.current === 0) setSaving(false);
       }
@@ -659,9 +813,33 @@ function App() {
     settingsQueue.current = task.catch(() => undefined);
     return task;
   }
+  function commitNumber(field: "first_event_delay_ms" | "delay_multiplier") {
+    const raw = drafts[field];
+    setDrafts(({ [field]: _, ...rest }) => rest);
+    if (raw === undefined) return;
+    const value = Number(raw);
+    const valid =
+      raw.trim() !== "" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      (field === "first_event_delay_ms"
+        ? Number.isInteger(value) && value <= 86_400_000
+        : value <= 1_000_000);
+    if (!valid) {
+      setError(
+        field === "first_event_delay_ms"
+          ? "First event delay must be a whole number of milliseconds from 0 to 86400000"
+          : "Delay multiplier must be between 0 and 1000000",
+      );
+      return;
+    }
+    if (value !== settingsRef.current[field])
+      void saveSettings({ [field]: value });
+  }
   async function createCollection() {
     if (creating) return;
     setCreating(true);
+    setCreateError("");
     try {
       const exclusions = pointers
         .split("\n")
@@ -679,18 +857,20 @@ function App() {
       setPointers("");
       await saveSettings({ active_collection_id: c.id });
     } catch (e) {
-      fail(e);
+      setCreateError(message(e));
     } finally {
       setCreating(false);
     }
   }
-  async function inspect(id: number) {
+  async function inspect(id: number, refresh = false) {
     const version = ++inspectVersion.current;
-    compareVersion.current += 1;
-    setError("");
-    setInspectOpen(true);
-    setSelected(null);
-    setCompare(null);
+    if (!refresh) {
+      compareVersion.current += 1;
+      setInspectError("");
+      setInspectOpen(true);
+      setSelected(null);
+      setCompare(null);
+    }
     try {
       const e = await api<Entry>(`/api/recordings/${id}`);
       if (version !== inspectVersion.current) return;
@@ -698,12 +878,18 @@ function App() {
       setEditText(e.text || "");
       setAdvanced(pretty(editableRevision(e.revision)));
     } catch (e) {
-      if (version === inspectVersion.current) fail(e);
+      if (version === inspectVersion.current) failInspect(e);
     }
   }
+  async function afterRevisionChange(id: number, version: number) {
+    if (version === inspectVersion.current) await inspect(id, true);
+    await load();
+  }
   async function edit(kind: "text" | "advanced") {
-    if (!selected) return;
-    setSaving(true);
+    if (!selected || revising) return;
+    const version = inspectVersion.current;
+    setRevising(true);
+    setInspectError("");
     try {
       let body: string;
       if (kind === "text") {
@@ -712,7 +898,11 @@ function App() {
           base_revision_id: selected.revision.id,
         });
       } else {
-        JSON.parse(advanced);
+        try {
+          JSON.parse(advanced);
+        } catch (e) {
+          throw new Error(`Revision must be valid JSON: ${message(e)}`);
+        }
         body = `{"revision":${advanced},"base_revision_id":${selected.revision.id}}`;
       }
       await api(`/api/recordings/${selected.recording.id}/edit`, {
@@ -720,17 +910,18 @@ function App() {
         body,
       });
       notify("New revision activated");
-      await inspect(selected.recording.id);
-      await load();
+      await afterRevisionChange(selected.recording.id, version);
     } catch (e) {
-      fail(e);
+      failInspect(e);
     } finally {
-      setSaving(false);
+      setRevising(false);
     }
   }
   async function restore(id: number) {
-    if (!selected) return;
-    setSaving(true);
+    if (!selected || revising) return;
+    const version = inspectVersion.current;
+    setRevising(true);
+    setInspectError("");
     try {
       await api(`/api/recordings/${selected.recording.id}/restore`, {
         method: "POST",
@@ -740,17 +931,17 @@ function App() {
         }),
       });
       notify("Revision restored");
-      await inspect(selected.recording.id);
-      await load();
+      await afterRevisionChange(selected.recording.id, version);
     } catch (e) {
-      fail(e);
+      failInspect(e);
     } finally {
-      setSaving(false);
+      setRevising(false);
     }
   }
   async function compareRequest(raw: string, historyID?: number) {
     if (!selected) return;
     const version = ++compareVersion.current;
+    setInspectError("");
     try {
       let body: string;
       if (historyID) {
@@ -768,10 +959,16 @@ function App() {
       });
       if (version === compareVersion.current) setCompare(r.differences);
     } catch (e) {
+      if (version !== compareVersion.current) return;
+      setCompare(null);
       if (e instanceof SyntaxError)
-        fail(new Error("Request must be valid JSON"));
-      else fail(e);
+        failInspect(new Error("Request must be valid JSON"));
+      else failInspect(e);
     }
+  }
+  function clearCompare() {
+    compareVersion.current += 1;
+    setCompare(null);
   }
   async function importDB(file: File) {
     setImporting(true);
@@ -779,7 +976,7 @@ function App() {
       await api("/api/import", {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
-        body: await file.arrayBuffer(),
+        body: file,
       });
       notify("Snapshot imported");
       await load();
@@ -871,9 +1068,15 @@ function App() {
           >
             <XCircle className="mt-0.5 size-4 shrink-0" />
             <span className="flex-1">{error}</span>
-            <button onClick={() => setError("")} aria-label="Dismiss">
-              ×
-            </button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="-my-1 size-6 text-red-800 hover:bg-red-100"
+              onClick={() => setError("")}
+              aria-label="Dismiss error"
+            >
+              <X className="size-4" />
+            </Button>
           </div>
         )}
         <AnalyticsDashboard
@@ -898,7 +1101,11 @@ function App() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div
+                role="radiogroup"
+                aria-label="Traffic mode"
+                className="grid gap-2 sm:grid-cols-3"
+              >
                 {(
                   [
                     ["record", "Record", "Always call upstream"],
@@ -908,10 +1115,12 @@ function App() {
                 ).map(([v, label, desc]) => (
                   <button
                     key={v}
-                    disabled={busy || saving}
+                    role="radio"
+                    aria-checked={settings.mode === v}
+                    disabled={busy}
                     onClick={() => void saveSettings({ mode: v })}
                     className={cn(
-                      "rounded-xl border p-3 text-left transition",
+                      "rounded-xl border p-3 text-left transition outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-45",
                       settings.mode === v
                         ? "border-primary bg-primary text-primary-foreground shadow-sm"
                         : "bg-background hover:bg-muted",
@@ -953,19 +1162,19 @@ function App() {
                   className="mt-1.5"
                   type="number"
                   min="0"
+                  max="86400000"
+                  step="1"
                   disabled={busy}
-                  value={settings.first_event_delay_ms}
+                  value={
+                    drafts.first_event_delay_ms ?? settings.first_event_delay_ms
+                  }
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      first_event_delay_ms: Number(e.target.value),
-                    })
+                    setDrafts((d) => ({
+                      ...d,
+                      first_event_delay_ms: e.target.value,
+                    }))
                   }
-                  onBlur={(e) =>
-                    void saveSettings({
-                      first_event_delay_ms: Number(e.target.value),
-                    })
-                  }
+                  onBlur={() => commitNumber("first_event_delay_ms")}
                 />
               </label>
               <label className="text-xs font-medium">
@@ -974,20 +1183,17 @@ function App() {
                   className="mt-1.5"
                   type="number"
                   min="0"
+                  max="1000000"
                   step="0.1"
                   disabled={busy}
-                  value={settings.delay_multiplier}
+                  value={drafts.delay_multiplier ?? settings.delay_multiplier}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      delay_multiplier: Number(e.target.value),
-                    })
+                    setDrafts((d) => ({
+                      ...d,
+                      delay_multiplier: e.target.value,
+                    }))
                   }
-                  onBlur={(e) =>
-                    void saveSettings({
-                      delay_multiplier: Number(e.target.value),
-                    })
-                  }
+                  onBlur={() => commitNumber("delay_multiplier")}
                 />
               </label>
               <Button
@@ -1022,7 +1228,10 @@ function App() {
                     ref={createTriggerRef}
                     size="icon"
                     variant="ghost"
-                    onClick={() => setCreateOpen(true)}
+                    onClick={() => {
+                      setCreateError("");
+                      setCreateOpen(true);
+                    }}
                     aria-label="New collection"
                   >
                     <Plus className="size-4" />
@@ -1030,24 +1239,28 @@ function App() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                <select
-                  aria-label="Active collection"
-                  disabled={busy || saving}
-                  className="h-10 w-full rounded-lg border bg-background px-3 text-sm"
-                  value={settings.active_collection_id}
-                  onChange={(e) =>
-                    void saveSettings({
-                      active_collection_id: Number(e.target.value),
-                    })
+                <Select
+                  disabled={!collections.length}
+                  value={
+                    settings.active_collection_id
+                      ? String(settings.active_collection_id)
+                      : ""
+                  }
+                  onValueChange={(v) =>
+                    void saveSettings({ active_collection_id: Number(v) })
                   }
                 >
-                  <option value={0}>Select a collection</option>
-                  {collections.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger aria-label="Active collection">
+                    <SelectValue placeholder="Select a collection" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {collections.map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>
+                        {c.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 {active && (
                   <div className="rounded-lg bg-muted p-3">
                     <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -1077,8 +1290,7 @@ function App() {
                     size="sm"
                     disabled={!active}
                     onClick={() =>
-                      active &&
-                      window.open(`/api/collections/${active.id}/export`)
+                      active && download(`/api/collections/${active.id}/export`)
                     }
                   >
                     <Download className="size-3.5" />
@@ -1131,11 +1343,11 @@ function App() {
               <CardHeader className="gap-3 pb-2 sm:flex-row sm:items-center sm:justify-between">
                 <TabsList>
                   <TabsTrigger value="recordings">
-                    <Archive className="mr-1.5 size-3.5" />
+                    <Archive className="size-3.5" />
                     Recordings
                   </TabsTrigger>
                   <TabsTrigger value="history">
-                    <HistoryIcon className="mr-1.5 size-3.5" />
+                    <HistoryIcon className="size-3.5" />
                     History
                   </TabsTrigger>
                 </TabsList>
@@ -1248,7 +1460,7 @@ function App() {
                               setHistoryDetail(h);
                             }
                           }}
-                          className="flex w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-muted"
+                          className="flex w-full items-center gap-3 rounded-lg p-3 text-left outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           <Outcome value={h.outcome} />
                           <div className="min-w-0 flex-1">
@@ -1287,16 +1499,22 @@ function App() {
               Create immutable matching rules for a new recording set.
             </DialogDescription>
           </DialogHeader>
-          {error && (
+          {createError && (
             <div
               role="alert"
               className="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800"
             >
               <XCircle className="mt-0.5 size-4 shrink-0" />
-              <span className="flex-1">{error}</span>
-              <button onClick={() => setError("")} aria-label="Dismiss error">
-                ×
-              </button>
+              <span className="flex-1">{createError}</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="-my-1 size-6 text-red-800 hover:bg-red-100"
+                onClick={() => setCreateError("")}
+                aria-label="Dismiss error"
+              >
+                <X className="size-4" />
+              </Button>
             </div>
           )}
           <div className="space-y-4">
@@ -1347,11 +1565,15 @@ function App() {
         restore={restore}
         compare={compare}
         compareRequest={compareRequest}
+        clearCompare={clearCompare}
         history={history}
-        saving={saving}
-        error={error}
-        clearError={() => setError("")}
-        returnFocus={() => inspectTriggerRef.current?.focus()}
+        saving={revising}
+        error={inspectError}
+        clearError={() => setInspectError("")}
+        returnFocus={() => {
+          const trigger = inspectTriggerRef.current;
+          if (trigger?.isConnected) trigger.focus();
+        }}
       />
       <Dialog
         open={historyDetail !== null}
@@ -1361,7 +1583,8 @@ function App() {
           className="max-w-3xl"
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            historyTriggerRef.current?.focus();
+            const trigger = historyTriggerRef.current;
+            if (trigger?.isConnected) trigger.focus();
           }}
         >
           <DialogHeader>
@@ -1416,6 +1639,7 @@ function Inspector({
   restore,
   compare,
   compareRequest,
+  clearCompare,
   history,
   saving,
   error,
@@ -1433,6 +1657,7 @@ function Inspector({
   restore: (id: number) => void;
   compare: Diff[] | null;
   compareRequest: (raw: string, historyID?: number) => void;
+  clearCompare: () => void;
   history: History[];
   saving: boolean;
   error: string;
@@ -1440,8 +1665,18 @@ function Inspector({
   returnFocus: () => void;
 }) {
   const [compareRaw, setCompareRaw] = useState("");
-  const [historyID, setHistoryID] = useState(0);
+  const [chosenHistoryID, setHistoryID] = useState(0);
+  const recordingID = entry?.recording.id;
+  const [compareFor, setCompareFor] = useState(recordingID);
+  if (recordingID !== undefined && recordingID !== compareFor) {
+    setCompareFor(recordingID);
+    setCompareRaw("");
+    setHistoryID(0);
+  }
   const misses = history.filter((h) => /miss/i.test(h.outcome));
+  const historyID = misses.some((h) => h.id === chosenHistoryID)
+    ? chosenHistoryID
+    : 0;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
@@ -1466,9 +1701,10 @@ function Inspector({
           ) : (
             <div
               className="flex h-48 items-center justify-center"
-              aria-label="Loading recording"
+              role="status"
             >
               <RefreshCw className="size-5 animate-spin text-muted-foreground" />
+              <span className="sr-only">Loading recording</span>
             </div>
           )
         ) : (
@@ -1494,12 +1730,18 @@ function Inspector({
               >
                 <XCircle className="mt-0.5 size-4 shrink-0" />
                 <span className="flex-1">{error}</span>
-                <button onClick={clearError} aria-label="Dismiss error">
-                  ×
-                </button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="-my-1 size-6 text-red-800 hover:bg-red-100"
+                  onClick={clearError}
+                  aria-label="Dismiss error"
+                >
+                  <X className="size-4" />
+                </Button>
               </div>
             )}
-            <Tabs defaultValue="response">
+            <Tabs keepMounted defaultValue="response">
               <TabsList className="flex h-auto flex-wrap">
                 <TabsTrigger value="response">Response</TabsTrigger>
                 <TabsTrigger value="inspect">Inspect</TabsTrigger>
@@ -1637,6 +1879,7 @@ function Inspector({
                           <Button
                             variant="outline"
                             size="sm"
+                            disabled={saving}
                             onClick={() => restore(r.id)}
                           >
                             <RotateCcw className="size-3.5" />
@@ -1645,7 +1888,7 @@ function Inspector({
                         )}
                       </div>
                       <details className="mt-2 border-t pt-2 text-xs">
-                        <summary className="text-muted-foreground hover:text-foreground">
+                        <summary className="cursor-pointer rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
                           Inspect revision data
                         </summary>
                         <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-zinc-950 p-3 font-mono leading-5 text-zinc-200">
@@ -1668,25 +1911,38 @@ function Inspector({
                     </p>
                   </div>
                   {misses.length > 0 && (
-                    <select
-                      className="h-10 w-full rounded-lg border bg-background px-3 text-sm"
-                      aria-label="Missed request"
-                      value={historyID}
-                      onChange={(e) => setHistoryID(Number(e.target.value))}
+                    <Select
+                      value={String(historyID)}
+                      onValueChange={(v) => {
+                        setHistoryID(Number(v));
+                        clearCompare();
+                      }}
                     >
-                      <option value={0}>Paste request JSON instead</option>
-                      {misses.map((h) => (
-                        <option key={h.id} value={h.id}>
-                          {date(h.created_at)} · {h.route} · {shortKey(h.key)}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger aria-label="Missed request">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="max-w-[var(--radix-select-trigger-width)]">
+                        <SelectItem value="0">
+                          Paste request JSON instead
+                        </SelectItem>
+                        {misses.map((h) => (
+                          <SelectItem key={h.id} value={String(h.id)}>
+                            {date(h.created_at)} · {h.route} · {shortKey(h.key)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   )}
                   {!historyID && (
                     <Textarea
+                      aria-label="Request JSON"
+                      spellCheck={false}
                       className="code min-h-36 text-xs"
                       value={compareRaw}
-                      onChange={(e) => setCompareRaw(e.target.value)}
+                      onChange={(e) => {
+                        setCompareRaw(e.target.value);
+                        if (compare) clearCompare();
+                      }}
                       placeholder='{"model":"…","messages":[]}'
                     />
                   )}
@@ -1773,9 +2029,13 @@ function Data({
           size="sm"
           variant="ghost"
           onClick={() => {
-            void navigator.clipboard.writeText(display);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
+            navigator.clipboard?.writeText(display).then(
+              () => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1200);
+              },
+              () => setCopied(false),
+            );
           }}
         >
           {copied ? (
