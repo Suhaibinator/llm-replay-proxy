@@ -1,8 +1,9 @@
 # Implementation guide
 
-The executable wires three inference routes, `/api/` control routes, `/healthz`, and the embedded static Next.js export. The frontend calls same-origin JSON endpoints; no Next.js server is used at runtime.
+The executable wires three inference routes, `/api/` control routes, `/healthz`, and the embedded static Next.js export behind an authentication middleware. The frontend calls same-origin JSON endpoints; no Next.js server is used at runtime. `replay-proxy token issue` is the only way to mint access tokens; it runs the same configuration loading as the server and prints a token, without any HTTP involvement.
 
-- `internal/config` loads server-only upstream settings and credentials from local files, environment variables, and optional KMS startup reads.
+- `internal/auth` signs and verifies HS256 JWTs (`iss` `llm-replay-proxy`, `sub`, `jti`, `iat`, `nbf`, optional `exp`), resolves or generates the signing key file, and provides the middleware. The middleware requires a token for `/v1/*` and `/api/*` (checking the raw and cleaned path), accepts it from `Authorization: Bearer`, `x-api-key`, or (for `/api/*` only) the console cookie, and serves the `/auth?token=` console login that sets that cookie. `/healthz` and static assets pass through. Verification is stateless: there is no token table, and rotating the key invalidates every token.
+- `internal/config` loads server-only upstream settings and credentials from local files, environment variables, and optional KMS startup reads, including the JWT signing key (`REPLAY_JWT_KEY`, `auth.signing_key_file`, or `auth.signing_key_secret`) and the loopback-only `auth.disabled` switch.
 - `internal/match` builds versioned exact SHA-256 keys and applies JSON Pointer exclusions.
 - `internal/proxy` shares forwarding and playback for all protocols. It handles request cancellation, live flushing, timestamp capture, allowlisted response headers, and publication only after protocol validation.
 - `internal/protocol` owns completion checks and text reconstruction/editing.
@@ -16,5 +17,5 @@ The replay clock is injectable. The first frame uses the configured first-event 
 
 Edits and restores compare the caller's base revision atomically before activation, rejecting stale updates. Snapshot imports validate the complete source before acquiring the destination write transaction.
 
-The management API returns errors as `{ "error": { "code": "...", "message": "..." } }`. Inference misses use the same shape. An upstream error body/status is forwarded as received. Once a live stream has started, later failures cannot replace its already-sent HTTP status; its bytes still reach the caller, and its history entry explains why it was not recorded.
+The management API returns errors as `{ "error": { "code": "...", "message": "..." } }`. Inference misses and authentication failures (401 `unauthorized`) use the same shape. The proxy builds each upstream request from scratch with only `Content-Type`, configured non-secret headers, and the configured upstream credential, so a caller's token, `x-api-key`, or cookie is never forwarded; history and matching inputs store only the request body. An upstream error body/status is forwarded as received. Once a live stream has started, later failures cannot replace its already-sent HTTP status; its bytes still reach the caller, and its history entry explains why it was not recorded.
 

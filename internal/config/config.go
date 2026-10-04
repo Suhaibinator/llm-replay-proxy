@@ -29,6 +29,7 @@ type Config struct {
 	Listen    string              `json:"listen"`
 	Database  string              `json:"database"`
 	Upstreams map[string]Upstream `json:"upstreams"`
+	Auth      Auth                `json:"auth"`
 }
 
 // Load resolves an optional local file and KMS snapshot once at startup.
@@ -180,6 +181,9 @@ func loadWithOverrides(ctx context.Context, path string, factory kmsFactory, ove
 			c.Upstreams[p.route] = u
 		}
 	}
+	if err := resolveSigningKey(ctx, &c, client); err != nil {
+		return c, err
+	}
 	if v, ok := os.LookupEnv("REPLAY_LISTEN"); ok {
 		c.Listen = v
 	}
@@ -200,6 +204,9 @@ func (c Config) Validate() error {
 	}
 	if c.Database == "" {
 		return fmt.Errorf("database path is required")
+	}
+	if err := c.Auth.validate(c.Listen); err != nil {
+		return err
 	}
 	for route, u := range c.Upstreams {
 		switch route {
