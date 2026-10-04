@@ -512,6 +512,7 @@ function App() {
     [saving, setSaving] = useState(false),
     [creating, setCreating] = useState(false),
     [importing, setImporting] = useState(false),
+    [settingsLoaded, setSettingsLoaded] = useState(false),
     [error, setError] = useState(""),
     [toast, setToast] = useState("");
   const [historyDetail, setHistoryDetail] = useState<History | null>(null);
@@ -536,11 +537,15 @@ function App() {
   const loadVersion = useRef(0);
   const collectionVersion = useRef(0);
   const inspectVersion = useRef(0);
+  // Recording shown in the open inspector (0 when closed).
+  const inspectedID = useRef(0);
   const compareVersion = useRef(0);
   const settingsRef = useRef(settings);
   const confirmedSettings = useRef(settings);
   const pendingPatches = useRef<Partial<Settings>[]>([]);
   const settingsVersion = useRef(0);
+  // Writes PUT whole settings, so none may be sent before the server's are known.
+  const settingsLoadedRef = useRef(false);
   const busyCount = useRef(0);
   const toastTimer = useRef(0);
   const settingsQueue = useRef(Promise.resolve());
@@ -618,7 +623,8 @@ function App() {
   );
   const load = useCallback(async () => {
     const version = ++loadVersion.current;
-    const settingsAtStart = settingsVersion.current;
+    const settingsAtStart = settingsVersion.current,
+      writesAtStart = pendingWrites.current;
     startBusy();
     setError("");
     try {
@@ -628,14 +634,18 @@ function App() {
       ]);
       if (version !== loadVersion.current) return;
       setCollections(cs);
-      // A settings write queued after this load started is newer than `fetched`.
+      // A write pending at either end, or queued meanwhile, may be newer than
+      // `fetched` (the GET can be answered before an in-flight PUT commits).
       if (
+        !writesAtStart &&
         !pendingWrites.current &&
         settingsVersion.current === settingsAtStart
       ) {
         confirmedSettings.current = fetched;
         settingsRef.current = fetched;
         setSettings(fetched);
+        settingsLoadedRef.current = true;
+        setSettingsLoaded(true);
       }
       const ss = settingsRef.current;
       if (!analyticsCollectionRef.current) {
@@ -674,7 +684,9 @@ function App() {
         setHistory([]);
       }
     } catch (e) {
-      if (version === loadVersion.current) fail(e);
+      // The modal inspector would hide the page banner.
+      if (version === loadVersion.current)
+        (inspectedID.current ? failInspect : fail)(e);
     } finally {
       endBusy();
     }
@@ -762,6 +774,10 @@ function App() {
     }
   }
   function saveSettings(patch: Partial<Settings>) {
+    if (!settingsLoadedRef.current) {
+      fail(new Error("Settings are still loading. Refresh and try again."));
+      return Promise.resolve();
+    }
     settingsVersion.current += 1;
     pendingPatches.current.push(patch);
     const optimistic = { ...settingsRef.current, ...patch };
@@ -782,14 +798,20 @@ function App() {
         });
         confirmedSettings.current = next;
         if (next.active_collection_id !== previous.active_collection_id) {
-          await loadCollection(next.active_collection_id);
           analyticsCollectionRef.current = next.active_collection_id;
           setAnalyticsCollection(next.active_collection_id);
-          await refreshAnalytics(
-            next.active_collection_id,
-            analyticsRangeRef.current,
-          );
-          notify("Collection activated");
+          // The write succeeded; a failed refresh must not roll it back.
+          try {
+            await loadCollection(next.active_collection_id);
+            await refreshAnalytics(
+              next.active_collection_id,
+              analyticsRangeRef.current,
+            );
+            notify("Collection activated");
+          } catch (e) {
+            await load();
+            fail(e);
+          }
         } else {
           notify("Settings saved");
         }
@@ -837,7 +859,7 @@ function App() {
       void saveSettings({ [field]: value });
   }
   async function createCollection() {
-    if (creating) return;
+    if (creating || !settingsLoadedRef.current) return;
     setCreating(true);
     setCreateError("");
     try {
@@ -865,6 +887,7 @@ function App() {
   async function inspect(id: number, refresh = false) {
     const version = ++inspectVersion.current;
     if (!refresh) {
+      inspectedID.current = id;
       compareVersion.current += 1;
       setInspectError("");
       setInspectOpen(true);
@@ -881,13 +904,14 @@ function App() {
       if (version === inspectVersion.current) failInspect(e);
     }
   }
-  async function afterRevisionChange(id: number, version: number) {
-    if (version === inspectVersion.current) await inspect(id, true);
+  async function afterRevisionChange(id: number) {
+    // Refresh even if the dialog was reopened meanwhile: that GET may predate
+    // the new revision and would leave a stale base_revision_id.
+    if (inspectedID.current === id) await inspect(id, true);
     await load();
   }
   async function edit(kind: "text" | "advanced") {
     if (!selected || revising) return;
-    const version = inspectVersion.current;
     setRevising(true);
     setInspectError("");
     try {
@@ -910,7 +934,7 @@ function App() {
         body,
       });
       notify("New revision activated");
-      await afterRevisionChange(selected.recording.id, version);
+      await afterRevisionChange(selected.recording.id);
     } catch (e) {
       failInspect(e);
     } finally {
@@ -919,7 +943,6 @@ function App() {
   }
   async function restore(id: number) {
     if (!selected || revising) return;
-    const version = inspectVersion.current;
     setRevising(true);
     setInspectError("");
     try {
@@ -931,7 +954,7 @@ function App() {
         }),
       });
       notify("Revision restored");
-      await afterRevisionChange(selected.recording.id, version);
+      await afterRevisionChange(selected.recording.id);
     } catch (e) {
       failInspect(e);
     } finally {
@@ -1117,7 +1140,7 @@ function App() {
                     key={v}
                     role="radio"
                     aria-checked={settings.mode === v}
-                    disabled={busy}
+                    disabled={busy || !settingsLoaded}
                     onClick={() => void saveSettings({ mode: v })}
                     className={cn(
                       "rounded-xl border p-3 text-left transition outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-45",
@@ -1164,7 +1187,7 @@ function App() {
                   min="0"
                   max="86400000"
                   step="1"
-                  disabled={busy}
+                  disabled={busy || !settingsLoaded}
                   value={
                     drafts.first_event_delay_ms ?? settings.first_event_delay_ms
                   }
@@ -1185,7 +1208,7 @@ function App() {
                   min="0"
                   max="1000000"
                   step="0.1"
-                  disabled={busy}
+                  disabled={busy || !settingsLoaded}
                   value={drafts.delay_multiplier ?? settings.delay_multiplier}
                   onChange={(e) =>
                     setDrafts((d) => ({
@@ -1200,7 +1223,7 @@ function App() {
                 className="col-span-2"
                 variant="secondary"
                 size="sm"
-                disabled={busy}
+                disabled={busy || !settingsLoaded}
                 onClick={() =>
                   void saveSettings({
                     first_event_delay_ms: 0,
@@ -1228,6 +1251,7 @@ function App() {
                     ref={createTriggerRef}
                     size="icon"
                     variant="ghost"
+                    disabled={!settingsLoaded}
                     onClick={() => {
                       setCreateError("");
                       setCreateOpen(true);
@@ -1240,7 +1264,7 @@ function App() {
               </CardHeader>
               <CardContent className="space-y-3">
                 <Select
-                  disabled={!collections.length}
+                  disabled={!collections.length || !settingsLoaded}
                   value={
                     settings.active_collection_id
                       ? String(settings.active_collection_id)
@@ -1542,7 +1566,7 @@ function App() {
             </label>
             <Button
               className="w-full"
-              disabled={!createName.trim() || creating}
+              disabled={!createName.trim() || creating || !settingsLoaded}
               onClick={() => void createCollection()}
             >
               {creating ? "Creating…" : "Create and activate"}
@@ -1553,7 +1577,10 @@ function App() {
       <Inspector
         open={inspectOpen}
         setOpen={(next) => {
-          if (!next) inspectVersion.current += 1;
+          if (!next) {
+            inspectVersion.current += 1;
+            inspectedID.current = 0;
+          }
           setInspectOpen(next);
         }}
         entry={selected}
@@ -1677,6 +1704,13 @@ function Inspector({
   const historyID = misses.some((h) => h.id === chosenHistoryID)
     ? chosenHistoryID
     : 0;
+  // The chosen miss left polled history: drop its result with the selection.
+  useEffect(() => {
+    if (chosenHistoryID && !historyID) {
+      setHistoryID(0);
+      clearCompare();
+    }
+  }, [chosenHistoryID, historyID, clearCompare]);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
