@@ -3,9 +3,12 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"mime"
@@ -126,7 +129,8 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	streaming := false
-	if value, exists := request["stream"]; exists {
+	// An explicit null means the default, as it does for the providers.
+	if value, exists := request["stream"]; exists && value != nil {
 		var ok bool
 		streaming, ok = value.(bool)
 		if !ok {
@@ -166,7 +170,7 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 			item := model.History{CollectionID: collection.ID, Route: r.URL.Path, Key: key, Request: clone(body), Outcome: "hit", CacheStatus: "hit", RecordingID: entry.Recording.ID, Source: "replay", DurationMS: &duration, FirstEventMS: first}
 			if replayErr != nil {
 				item.Detail = replayErr.Error()
-				if errors.Is(replayErr, context.Canceled) {
+				if clientGone(r.Context(), replayErr) {
 					item.Outcome = "interrupted"
 				} else {
 					item.Outcome = "error"
@@ -213,8 +217,10 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 		if err := r.Context().Err(); err != nil {
 			return nil, err
 		}
-		_, err := io.WriteString(w, entry.Revision.Body)
-		return nil, err
+		if _, err := io.WriteString(w, entry.Revision.Body); err != nil {
+			return nil, clientWriteError(err)
+		}
+		return nil, nil
 	}
 	flusher, _ := w.(http.Flusher)
 	previous := int64(0)
@@ -236,7 +242,7 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 			return first, err
 		}
 		if _, err := io.WriteString(w, event.Data); err != nil {
-			return first, err
+			return first, clientWriteError(err)
 		}
 		if flusher != nil {
 			flusher.Flush()
@@ -277,20 +283,36 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	for k, v := range upstream.Headers {
 		req.Header.Set(k, v)
 	}
+	// Content-Encoding is not forwarded, so the body must reach the caller and
+	// the recording decoded. Leaving Accept-Encoding to the transport keeps its
+	// transparent gzip decompression enabled; a configured value would disable it.
+	req.Header.Del("Accept-Encoding")
 	setCredential(req.Header, r.URL.Path, upstream.APIKey)
 	started := h.clock.Now()
 	resp, err := h.client.Do(req)
 	if err != nil {
+		if clientGone(r.Context(), err) {
+			history("interrupted", err.Error(), 0)
+			return
+		}
 		history("error", err.Error(), 0)
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
+	body, err := decodedBody(resp)
+	if err != nil {
+		history("error", err.Error(), 0)
+		writeError(w, 502, "upstream_error", err.Error())
+		return
+	}
+	defer body.Close()
 	headers := allowedHeaders(resp.Header)
 	copyResponseHeaders(w.Header(), headers)
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	revision := model.Revision{Status: resp.StatusCode, Headers: headers, Source: "recorded"}
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
 	var readErr error
 	if streaming {
 		parser := newSSEParser()
@@ -298,16 +320,16 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		captureOverflow := false
 		buf := make([]byte, 32*1024)
 		for {
-			n, err := resp.Body.Read(buf)
+			n, err := body.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
 				written, writeErr := w.Write(chunk)
 				if writeErr != nil {
-					readErr = writeErr
+					readErr = clientWriteError(writeErr)
 					break
 				}
 				if written != len(chunk) {
-					readErr = io.ErrShortWrite
+					readErr = clientWriteError(io.ErrShortWrite)
 					break
 				}
 				if flusher != nil {
@@ -334,12 +356,16 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 				break
 			}
 		}
-		if parser.Pending() {
-			readErr = errors.New("upstream ended with an incomplete SSE frame")
-		}
-		mediaType, _, mediaErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-		if mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
-			readErr = errors.New("streaming upstream response is not text/event-stream")
+		// Error statuses carry provider error bodies (usually JSON), which are
+		// forwarded as received; SSE framing only applies to successful streams.
+		if success && readErr == nil {
+			if parser.Pending() {
+				readErr = errors.New("upstream ended with an incomplete SSE frame")
+			}
+			mediaType, _, mediaErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+			if mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+				readErr = errors.New("streaming upstream response is not text/event-stream")
+			}
 		}
 		if parser.Overflow() || captureOverflow {
 			readErr = errors.New("upstream response exceeds recording limit")
@@ -347,22 +373,27 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	} else {
 		responseBody := &limitedCapture{limit: maxRecordedResponseBytes}
 		writer := io.MultiWriter(w, responseBody)
-		_, readErr = io.Copy(writer, resp.Body)
+		_, readErr = copyToClient(writer, body)
 		if responseBody.overflow {
 			readErr = errors.New("upstream response exceeds recording limit")
 		}
 		revision.Body = responseBody.buf.String()
 	}
-	if readErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		detail := resp.Status
+	if readErr != nil || !success {
+		// The upstream status leads the detail so a failed stream still
+		// explains which HTTP error the caller received.
+		var details []string
+		if !success {
+			details = append(details, resp.Status)
+		}
 		if readErr != nil {
-			detail = readErr.Error()
+			details = append(details, readErr.Error())
 		}
 		outcome := "error"
-		if errors.Is(readErr, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+		if clientGone(r.Context(), readErr) {
 			outcome = "interrupted"
 		}
-		history(outcome, detail, 0)
+		history(outcome, strings.Join(details, ": "), 0)
 		return
 	}
 	if err := protocol.Validate(r.URL.Path, streaming, revision); err != nil {
@@ -376,10 +407,79 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	recording := model.Recording{CollectionID: collectionID, Key: key, Route: r.URL.Path, Request: clone(original), MatchingInput: clone(canonical), UpstreamIdentity: identity, Streaming: streaming}
 	entry, err := h.db.Publish(r.Context(), recording, revision)
 	if err != nil {
-		history("error", err.Error(), 0)
+		outcome := "error"
+		if clientGone(r.Context(), err) {
+			outcome = "interrupted"
+		}
+		history(outcome, err.Error(), 0)
 		return
 	}
 	history("recorded", "", entry.Recording.ID)
+}
+
+// errClientWrite marks a failed write to the caller's connection, which only
+// happens once the caller has gone away.
+var errClientWrite = errors.New("client connection closed")
+
+func clientWriteError(err error) error {
+	return fmt.Errorf("%w: %w", errClientWrite, err)
+}
+
+// clientGone reports whether a failure was caused by the caller disconnecting
+// (or the server shutting down) rather than by the upstream or storage.
+func clientGone(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, errClientWrite)
+}
+
+// copyToClient copies a non-streaming body, tagging failed writes to the caller
+// so they are not mistaken for upstream read failures.
+func copyToClient(dst io.Writer, src io.Reader) (int64, error) {
+	var written int64
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			m, writeErr := dst.Write(buf[:n])
+			written += int64(m)
+			if writeErr != nil {
+				return written, clientWriteError(writeErr)
+			}
+			if m != n {
+				return written, clientWriteError(io.ErrShortWrite)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return written, nil
+		}
+		if err != nil {
+			return written, err
+		}
+	}
+}
+
+// decodedBody returns the upstream body without content coding. The default
+// transport already removes gzip it requested; this covers custom transports
+// and upstreams that compress without being asked.
+func decodedBody(resp *http.Response) (io.ReadCloser, error) {
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "", "identity":
+		return io.NopCloser(resp.Body), nil
+	case "gzip", "x-gzip":
+		reader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("decode gzip upstream response: %w", err)
+		}
+		return reader, nil
+	case "deflate":
+		reader, err := zlib.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("decode deflate upstream response: %w", err)
+		}
+		return reader, nil
+	default:
+		return nil, fmt.Errorf("unsupported upstream Content-Encoding %q", encoding)
+	}
 }
 
 func hasSSEData(frame string) bool {
