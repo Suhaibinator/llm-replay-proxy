@@ -13,11 +13,15 @@ dependencies. Both modules require Go 1.27.1.
 ## Provider configuration
 
 Configure one ordinary Go Common HTTP provider. Endpoint values are complete
-URLs; Go Common does not append SDK paths. The v1 proxy has no client
-authentication and binds to localhost by default, so configure Go Common's HTTP
-provider for anonymous authentication. The proxy's upstream credentials remain
-in the proxy process environment or local config and are never part of Go Common
-config or the recording database.
+URLs; Go Common does not append SDK paths. The proxy requires an access token
+issued on the proxy host with `replay-proxy token issue` (see the README's
+Authentication section). Give that token to Go Common as the provider's
+credential binding and leave `http.auth` at its default: Go Common then sends
+`Authorization: Bearer <token>` for Chat Completions and Responses and
+`x-api-key: <token>` for Anthropic Messages, both of which the proxy accepts. The
+proxy's upstream credentials remain in the proxy process environment or local
+config and are never part of Go Common config or the recording database; the
+token is checked by the proxy and never forwarded upstream.
 
 ```yaml
 inference_providers:
@@ -25,17 +29,18 @@ inference_providers:
     name: Local inference replay proxy
     adapter: http
     default_api: 3 # Responses
-    http:
-      auth: none
+    credential_ref: replay-proxy-token
     endpoints:
       chat_completions: http://127.0.0.1:8080/v1/chat/completions
       responses: http://127.0.0.1:8080/v1/responses
       anthropic_messages: http://127.0.0.1:8080/v1/messages
 ```
 
-Do not add a credential binding for this provider. If the proxy is exposed
-beyond the local machine, place it behind an authenticating reverse proxy; the
-application itself does not validate incoming bearer or API keys.
+Bind `replay-proxy-token` to the issued JWT through the application's normal
+credential source (for example a KMS secret). The token is a client credential,
+not a provider key; rotate it by issuing a new one, or rotate the proxy's
+signing key to invalidate every token at once. `http.auth: none` works only
+against a proxy configured with `auth.disabled` on a loopback address.
 
 Chat Completions, Responses, and Anthropic Messages work through the existing
 Go Common adapters. Provider-native Google and Azure APIs are outside this
@@ -57,9 +62,16 @@ cd integration
 go test ./...
 ```
 
-Run one request against a live proxy with:
+The tests also check that a Go Common consumer authenticates to an
+auth-enforcing proxy with an issued token on all three protocols, that a
+consumer without a token is rejected, and that the token never reaches the
+upstream.
+
+Run one request against a live proxy with a token issued for it. `rehearse`
+reads the token from `-token` or `REPLAY_PROXY_API_KEY`:
 
 ```sh
+export REPLAY_PROXY_API_KEY="$(replay-proxy token issue -subject rehearsal)"
 cd integration
 go run ./cmd/rehearse \
   -proxy http://127.0.0.1:8080 \
@@ -81,7 +93,10 @@ semantically identical after canonicalization, including the selected protocol,
 model, messages, tools, tool result, and streaming flag.
 
 1. Start the proxy on localhost with its database path, fixed upstream URLs, and
-   upstream credentials configured. The server defaults to replay mode.
+   upstream credentials configured. The server defaults to replay mode. Run
+   `replay-proxy token issue` with the same `-config`/`-db`, export the printed
+   token as `REPLAY_PROXY_API_KEY`, and open the console login link from its
+   output.
 2. In the control panel, create and activate a collection for the rehearsal.
    Add exclusions before recording; matching rules freeze after the first
    recording. Switch the mode to **Record**.
@@ -91,7 +106,7 @@ model, messages, tools, tool result, and streaming flag.
 4. Run the tool workflow for every API used by the demo:
 
    ```sh
-   REPLAY_PROXY_API_KEY=local-only go run ./cmd/rehearse \
+   go run ./cmd/rehearse \
      -proxy http://127.0.0.1:8080 -api responses -model demo-model \
      -workflow tools -prompt 'What is the weather in Paris? Use lookup_weather.'
    ```

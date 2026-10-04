@@ -11,6 +11,10 @@ go run ./cmd/replay-proxy -config tests/browser/config.json &
 npm --prefix tests/browser test
 ```
 
+`tests/browser/config.json` sets `"auth": {"disabled": true}`, which the proxy
+accepts only because it listens on `127.0.0.1`, so the smoke test needs no
+access token.
+
 The protocol-aware response browser also has a read-only mocked API suite that
 covers all three response formats without changing the test database:
 
