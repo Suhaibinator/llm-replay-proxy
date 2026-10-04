@@ -38,6 +38,16 @@ route mismatch.
 `Event.data` contains a complete raw SSE frame, including event/data lines and its
 blank delimiter. `Event.offset_ms` is the relative capture time. Edits must retain
 valid event order, identities, completion, and agreement with final output.
+Frames follow the SSE field rules: a line without a colon is a field with an
+empty value (a bare `data` line), and a UTF-8 byte order mark is stripped from
+the first frame only.
+
+The plain-text editor only rewrites existing text; it never inserts events or
+adjusts metadata. A recording therefore reports an unavailability reason, and
+needs an advanced edit, when it contains tool calls, reasoning, refusals, audio,
+multiple choices/parts/blocks, non-empty annotations, citations, or logprobs
+(including any `*.annotation.added` Responses event), or a Responses stream
+with no `response.output_text.delta` event to rewrite.
 
 Shared Go data types are in `internal/model`. Storage exposes atomic
 `PublishIfActive` and `RestoreIfActive` operations for optimistic editing, while

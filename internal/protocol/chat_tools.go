@@ -37,19 +37,25 @@ func validateChatTools(rev model.Revision) error {
 				return fmt.Errorf("event %d choice: %w", eventIndex, err)
 			}
 			delta, _ := asMap(choice["delta"])
-			if calls, exists := delta["tool_calls"]; exists {
+			// Gateways such as LiteLLM send explicit nulls for absent fields.
+			if calls := delta["tool_calls"]; calls != nil {
 				list, ok := asSlice(calls)
 				if !ok {
 					return fmt.Errorf("event %d tool_calls must be an array", eventIndex)
 				}
-				for _, rawCall := range list {
+				for position, rawCall := range list {
 					call, ok := asMap(rawCall)
 					if !ok {
 						return fmt.Errorf("event %d tool call must be an object", eventIndex)
 					}
-					toolIndex, err := indexField(call, "index")
-					if err != nil {
-						return fmt.Errorf("event %d tool call: %w", eventIndex, err)
+					// Some compatible servers omit index; the call's position
+					// within this chunk then identifies it.
+					toolIndex := position
+					if call["index"] != nil {
+						toolIndex, err = indexField(call, "index")
+						if err != nil {
+							return fmt.Errorf("event %d tool call: %w", eventIndex, err)
+						}
 					}
 					key := fmt.Sprintf("%d:%d", choiceIndex, toolIndex)
 					state := tools[key]
@@ -81,7 +87,7 @@ func validateChatTools(rev model.Revision) error {
 					}
 				}
 			}
-			if fnRaw, exists := delta["function_call"]; exists {
+			if fnRaw := delta["function_call"]; fnRaw != nil {
 				fn, ok := asMap(fnRaw)
 				if !ok {
 					return fmt.Errorf("event %d function_call must be an object", eventIndex)
@@ -136,8 +142,11 @@ func validateChatTools(rev model.Revision) error {
 	return nil
 }
 
+// mergeStable records a tool identity field. Continuation chunks may repeat
+// it, omit it, or send null or "" (as several gateways do); none of those
+// change the identity, and the final check rejects calls never identified.
 func mergeStable(dst *string, value any, field string, eventIndex int) error {
-	if value == nil {
+	if value == nil || value == "" {
 		return nil
 	}
 	s, ok := asString(value)
