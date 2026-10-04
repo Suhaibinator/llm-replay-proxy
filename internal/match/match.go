@@ -202,7 +202,9 @@ func decodeValue(decoder *json.Decoder) (any, error) {
 		}
 		return object, nil
 	case '[':
-		var array []any
+		// A non-nil slice keeps an empty array distinct from null when the
+		// canonical body is re-encoded.
+		array := []any{}
 		for decoder.More() {
 			value, err := decodeValue(decoder)
 			if err != nil {

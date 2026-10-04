@@ -112,6 +112,43 @@ func TestArrayElementExclusion(t *testing.T) {
 	}
 }
 
+func TestEmptyArrayIsDistinctFromNull(t *testing.T) {
+	empty, emptyInput, err := Key("/v1/responses", "p", []byte(`{"tools":[]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	null, _, err := Key("/v1/responses", "p", []byte(`{"tools":null}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty == null {
+		t.Fatal("empty array and null share a key")
+	}
+	if !strings.Contains(string(emptyInput), `"tools":[]`) {
+		t.Fatalf("empty array not preserved: %s", emptyInput)
+	}
+	_, nestedInput, err := Key("/v1/responses", "p", []byte(`{"a":[[],{"b":[]}]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nestedInput), `"a":[[],{"b":[]}]`) {
+		t.Fatalf("nested empty arrays not preserved: %s", nestedInput)
+	}
+	// Removing every element by exclusion and sending an empty array produce
+	// the same matching input.
+	excluded, excludedInput, err := Key("/v1/responses", "p", []byte(`{"tools":["x"]}`), []string{"/tools/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alreadyEmpty, _, err := Key("/v1/responses", "p", []byte(`{"tools":[]}`), []string{"/tools/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excluded != alreadyEmpty || !strings.Contains(string(excludedInput), `"tools":[]`) {
+		t.Fatalf("exclusion-emptied array differs from empty array: %s", excludedInput)
+	}
+}
+
 func TestValidateExclusions(t *testing.T) {
 	valid := []string{"/metadata/request_id", "/a~1b/~0key", "/array/0"}
 	if err := ValidateExclusions(valid); err != nil {

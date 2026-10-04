@@ -180,7 +180,7 @@ func loadWithOverrides(ctx context.Context, path string, factory kmsFactory, ove
 			c.Upstreams[p.route] = u
 		}
 	}
-	if v, ok := os.LookupEnv("REPLAY_LISTEN"); ok {
+	if v, ok := os.LookupEnv("REPLAY_LISTEN"); ok && v != "" {
 		c.Listen = v
 	}
 	if v, ok := os.LookupEnv("REPLAY_DATABASE"); ok {
