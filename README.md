@@ -63,7 +63,7 @@ The control panel provides collection management, request history and hit/miss o
 
 Edits are validated before becoming new revisions. Stream structure, completion, and text/final-output agreement are checked. Restoring activates a saved immutable revision without deleting history. Usage remains historical metadata from the original provider response; editing never estimates token counts.
 
-Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions. Import adds collections to the current database. Upstream credentials and runtime configuration are separate. Keep the same non-secret upstream settings when moving recordings between installations.
+Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions; request history is not included. Import adds collections to the current database. Upstream credentials and runtime configuration are separate. Keep the same non-secret upstream settings when moving recordings between installations.
 
 
 

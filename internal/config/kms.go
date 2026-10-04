@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Suhaibinator/kms/sdk/go/kmsclient"
@@ -136,6 +137,16 @@ func applyKMSBootstrapEnvironment(c *Config) error {
 	return nil
 }
 
+// atomicMergeKey reports whether an object-valued configuration field must be
+// replaced wholesale instead of merged recursively. Secret references such as
+// api_key_secret select one credential generation: inheriting a remote version
+// pin into a local {"key":"other"} override would read the wrong secret, and
+// combining a remote version with a local label is contradictory.
+func atomicMergeKey(key string) bool { return strings.HasSuffix(key, "_secret") }
+
+// mergeJSON overlays one configuration object onto another. Objects are merged
+// recursively (top level, upstreams, per-route entries, headers) except secret
+// references, which the overlay replaces as a unit.
 func mergeJSON(base, overlay []byte) ([]byte, error) {
 	var a, b map[string]json.RawMessage
 	if err := json.Unmarshal(base, &a); err != nil || a == nil {
@@ -146,7 +157,7 @@ func mergeJSON(base, overlay []byte) ([]byte, error) {
 	}
 	for key, value := range b {
 		var old, new map[string]json.RawMessage
-		if json.Unmarshal(a[key], &old) == nil && old != nil && json.Unmarshal(value, &new) == nil && new != nil {
+		if !atomicMergeKey(key) && json.Unmarshal(a[key], &old) == nil && old != nil && json.Unmarshal(value, &new) == nil && new != nil {
 			merged, err := mergeJSON(a[key], value)
 			if err != nil {
 				return nil, err
