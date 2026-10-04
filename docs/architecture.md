@@ -4,7 +4,7 @@ The executable wires three inference routes, `/api/` control routes, `/healthz`,
 
 - `internal/config` loads server-only upstream settings and credentials from local files, environment variables, and optional KMS startup reads.
 - `internal/match` builds versioned exact SHA-256 keys and applies JSON Pointer exclusions.
-- `internal/proxy` shares forwarding and playback for all protocols. It handles request cancellation, live flushing, timestamp capture, allowlisted response headers, and publication only after protocol validation.
+- `internal/proxy` shares forwarding and playback for all protocols. It handles request cancellation, live flushing, timestamp capture, allowlisted response headers, and publication only after protocol validation. A caller that disconnects (or a server shutdown) is recorded as `interrupted` and receives no error body. Upstream bodies are forwarded and recorded without content coding: a configured `Accept-Encoding` is dropped so the transport negotiates and decodes gzip, and gzip/deflate responses are decoded otherwise.
 - `internal/protocol` owns completion checks and text reconstruction/editing.
 - `internal/store` owns SQLite, short publication transactions, collection isolation, revision history, and snapshot transfer.
 - `internal/admin` implements inspection, comparison, editing, settings, and import/export.
