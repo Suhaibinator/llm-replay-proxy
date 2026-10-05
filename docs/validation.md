@@ -26,13 +26,6 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 
 The race detector needs a C compiler. The shipping binary uses pure-Go SQLite and can be built with `CGO_ENABLED=0`.
 
-
-```sh
-cd integration
-go test -count=1 ./...
-```
-
-
 Frontend and browser checks:
 
 ```sh
@@ -42,3 +35,4 @@ npm run typecheck
 npm run build
 ```
 
+See [browser setup](../tests/browser/README.md) for the browser smoke workflow.

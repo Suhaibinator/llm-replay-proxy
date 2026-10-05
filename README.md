@@ -114,7 +114,7 @@ Edits are validated before becoming new revisions. Stream structure, completion,
 
 Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions; request history is not included. Import adds collections to the current database. Upstream credentials and runtime configuration are separate. Keep the same non-secret upstream settings when moving recordings between installations.
 
-
+## Recording a demo
 
 The proxy records inference only. Application tools and their side effects still execute during replay. Reset demo application data, use deterministic tool results and stable identifiers, and warm every inference request, including tool follow-ups and branches, before disconnecting the upstream network.
 
