@@ -46,7 +46,9 @@ type RequestSummary struct {
 	// Items counts conversation entries: messages, or Responses input items.
 	Items int `json:"items"`
 	// Preview is the start of the last user-written text.
-	Preview   string `json:"preview"`
+	Preview string `json:"preview"`
+	// Opening is the start of the first user-written text.
+	Opening   string `json:"opening"`
 	ToolCalls int    `json:"tool_calls"`
 	Images    int    `json:"images"`
 	Bytes     int64  `json:"bytes"`
@@ -65,6 +67,32 @@ type RecordingSummary struct {
 	Revisions int             `json:"revisions"`
 	Hits      int64           `json:"hits"`
 	LastHitAt string          `json:"last_hit_at"`
+	// Response summarizes the active revision; nil without one.
+	Response *ResponseSummary `json:"response"`
+}
+
+// TokenUsage holds token counts as the provider reported them; a count it did
+// not report is nil. Input includes cached input and output includes reasoning
+// for every protocol.
+type TokenUsage struct {
+	Input       *int64 `json:"input"`
+	CachedInput *int64 `json:"cached_input"`
+	Output      *int64 `json:"output"`
+	Reasoning   *int64 `json:"reasoning"`
+	Total       *int64 `json:"total"`
+}
+
+// ResponseSummary describes what a stored response contained, derived from
+// its body or SSE frames.
+type ResponseSummary struct {
+	Model   string     `json:"model"`
+	Outcome string     `json:"outcome"`
+	Usage   TokenUsage `json:"usage"`
+	// Cost is the provider-reported cost in USD (OpenRouter usage.cost).
+	Cost           *float64 `json:"cost"`
+	OutputChars    int      `json:"output_chars"`
+	ReasoningChars int      `json:"reasoning_chars"`
+	ToolCalls      int      `json:"tool_calls"`
 }
 
 type Entry struct {
@@ -78,15 +106,18 @@ type History struct {
 	Key          string          `json:"key"`
 	Request      json.RawMessage `json:"-"`
 	// Summary describes Request; nil when the call had no request body.
-	Summary      *RequestSummary `json:"request"`
-	Outcome      string          `json:"outcome"`
-	Detail       string          `json:"detail"`
-	RecordingID  int64           `json:"recording_id"`
-	Source       string          `json:"source"`
-	CacheStatus  string          `json:"lookup_outcome"`
-	DurationMS   *int64          `json:"duration_ms"`
-	FirstEventMS *int64          `json:"first_event_ms"`
-	CreatedAt    string          `json:"created_at"`
+	Summary     *RequestSummary `json:"request"`
+	Outcome     string          `json:"outcome"`
+	Detail      string          `json:"detail"`
+	RecordingID int64           `json:"recording_id"`
+	// RevisionID is the revision served: the active one on a hit, the
+	// published one when recorded; 0 otherwise.
+	RevisionID   int64  `json:"-"`
+	Source       string `json:"source"`
+	CacheStatus  string `json:"lookup_outcome"`
+	DurationMS   *int64 `json:"duration_ms"`
+	FirstEventMS *int64 `json:"first_event_ms"`
+	CreatedAt    string `json:"created_at"`
 }
 type AnalyticsPoint struct {
 	Start  string `json:"start"`
