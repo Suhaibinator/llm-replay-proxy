@@ -58,6 +58,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ResponseViewer } from "@/components/response-viewer";
+import { RequestViewer } from "@/components/request-viewer";
 import { AuthGate, notifyAuthRequired } from "@/components/auth-required";
 import { cn } from "@/lib/utils";
 
@@ -1609,7 +1610,7 @@ function App() {
         onOpenChange={(next) => !next && setHistoryDetail(null)}
       >
         <DialogContent
-          className="max-w-3xl"
+          className="max-w-4xl"
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             const trigger = historyTriggerRef.current;
@@ -1632,10 +1633,11 @@ function App() {
                   {historyDetail.detail}
                 </div>
               )}
-              <Data
-                title="Request"
-                value={historyDetail.request}
-                raw={historyDetail.request_text}
+              <RequestViewer
+                route={historyDetail.route}
+                raw={
+                  historyDetail.request_text ?? pretty(historyDetail.request)
+                }
               />
               <p className="break-all font-mono text-xs text-muted-foreground">
                 Match key: {historyDetail.key}
@@ -1780,6 +1782,7 @@ function Inspector({
             <Tabs keepMounted defaultValue="response">
               <TabsList className="flex h-auto flex-wrap">
                 <TabsTrigger value="response">Response</TabsTrigger>
+                <TabsTrigger value="request">Request</TabsTrigger>
                 <TabsTrigger value="inspect">Inspect</TabsTrigger>
                 <TabsTrigger value="text">Plain text</TabsTrigger>
                 <TabsTrigger value="events">Advanced</TabsTrigger>
@@ -1792,6 +1795,12 @@ function Inspector({
                   route={entry.recording.route}
                   streaming={entry.recording.streaming}
                   revision={entry.revision}
+                />
+              </TabsContent>
+              <TabsContent value="request">
+                <RequestViewer
+                  route={entry.recording.route}
+                  raw={entry.request_text ?? pretty(entry.recording.request)}
                 />
               </TabsContent>
               <TabsContent
@@ -1927,7 +1936,7 @@ function Inspector({
                         <summary className="cursor-pointer rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
                           Inspect revision data
                         </summary>
-                        <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-zinc-950 p-3 font-mono leading-5 text-zinc-200">
+                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-zinc-950 p-3 font-mono leading-5 text-zinc-200">
                           {pretty(r)}
                         </pre>
                       </details>
@@ -2082,7 +2091,7 @@ function Data({
           {copied ? "Copied" : "Copy"}
         </Button>
       </div>
-      <pre className="max-h-72 overflow-auto rounded-lg bg-zinc-950 p-3 text-[11px] leading-5 text-zinc-200">
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-zinc-950 p-3 text-[11px] leading-5 text-zinc-200">
         {display}
       </pre>
     </section>
