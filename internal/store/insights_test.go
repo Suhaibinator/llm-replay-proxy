@@ -65,7 +65,9 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	s := openTest(t)
 	cid := int64(1)
 	base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
-	at := func(minutes int) string { return base.Add(time.Duration(minutes) * time.Minute).Format(time.RFC3339Nano) }
+	at := func(minutes int) string {
+		return base.Add(time.Duration(minutes) * time.Minute).Format(time.RFC3339Nano)
+	}
 
 	aReq := chatRequest("gpt-a", "hello a")
 	a1 := publishChat(t, s, cid, aReq, chatResponse("gpt-a-2025", `{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens":50,"completion_tokens_details":{"reasoning_tokens":10},"total_tokens":150,"cost":0.01}`))
@@ -204,7 +206,9 @@ func TestThreadsGroupByConversationAndListTurns(t *testing.T) {
 	s := openTest(t)
 	cid := int64(1)
 	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
-	at := func(minutes int) string { return base.Add(time.Duration(minutes) * time.Minute).Format(time.RFC3339Nano) }
+	at := func(minutes int) string {
+		return base.Add(time.Duration(minutes) * time.Minute).Format(time.RFC3339Nano)
+	}
 	turn1 := chatRequest("m", "plan a trip")
 	turn2 := chatRequest("m", "plan a trip", "where to?", "Lisbon please")
 	turn3 := chatRequest("m", "plan a trip", "where to?", "Lisbon please", "booked", "and hotels")
@@ -298,6 +302,31 @@ func TestRecordingsCarryResponseSummary(t *testing.T) {
 	var saved int
 	if err := s.db.QueryRow("SELECT count(*) FROM revisions WHERE response_summary_v=?", responseSummaryVersion).Scan(&saved); err != nil || saved != 2 {
 		t.Fatalf("saved %d %v", saved, err)
+	}
+}
+
+func TestNearestComparesSmallRequestsWithFineChunks(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	system := bigText(3, 1500)
+	ask := func(modelName, question string) map[string]any {
+		return map[string]any{"model": modelName, "temperature": 0.2, "messages": []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": question}}}
+	}
+	resp := chatResponse("m", `{"prompt_tokens":1,"completion_tokens":1}`)
+	similar := publishChat(t, s, 1, ask("m", "what is the refund policy for annual plans?"), resp)
+	publishChat(t, s, 1, ask("other-model", "what is the refund policy for annual plans?"), resp)
+	publishChat(t, s, 1, chatRequest("m", "unrelated"), resp)
+	body, _ := json.Marshal(ask("m", "what is the refund policy for monthly plans?"))
+	addHistory(t, s, model.History{CollectionID: 1, Route: chatRoute, Key: "k", Request: body, Outcome: "miss"})
+	rows, _ := s.History(ctx, 1, 1)
+	got, err := s.Nearest(ctx, rows[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One stored chunk each, so only the fine comparison finds the overlap;
+	// the other model's request is not compared.
+	if len(got) != 1 || got[0].RecordingID != similar.Recording.ID || got[0].Reason != "shared_content" || got[0].Similarity < 0.8 || got[0].Similarity >= 1 {
+		t.Fatalf("candidates %+v", got)
 	}
 }
 

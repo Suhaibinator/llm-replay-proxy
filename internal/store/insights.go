@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"slices"
 	"sort"
 	"time"
@@ -45,12 +46,21 @@ func (r *historyRow) thread() string {
 const historyRowCols = `h.id,h.recording_id,h.route,h.outcome,h.lookup_outcome,h.source,h.detail,h.created_at,h.duration_ms,h.first_event_ms,
  h.request_body,b.summary_v,b.summary,h.revision_id,v.response_summary_v,v.response_summary`
 
-// historyRows reads history rows (selected by the clause after FROM/JOINs)
-// with their summaries. Each distinct body or revision summary is decoded
-// once; any not yet computed is computed and saved afterwards, in bulk.
-func (s *Store) historyRows(ctx context.Context, where string, args ...any) ([]historyRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+historyRowCols+` FROM history h
- LEFT JOIN bodies b ON b.id=h.request_body LEFT JOIN revisions v ON v.id=h.revision_id `+where, args...)
+// historyFrom joins history rows (h) to their request bodies (b) and served
+// revisions (v); threadFrom starts from a thread's bodies instead, through
+// the bodies.thread and history.request_body indexes (CROSS JOIN fixes that
+// join order for SQLite's planner).
+const (
+	historyFrom = `history h LEFT JOIN bodies b ON b.id=h.request_body LEFT JOIN revisions v ON v.id=h.revision_id `
+	threadFrom  = `bodies b CROSS JOIN history h ON h.request_body=b.id LEFT JOIN revisions v ON v.id=h.revision_id `
+)
+
+// historyRows reads history rows (from is historyFrom or threadFrom plus a
+// WHERE clause) with their summaries. Each distinct body or revision summary
+// is decoded once; any not yet computed is computed and saved afterwards, in
+// bulk.
+func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]historyRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+historyRowCols+` FROM `+from, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +320,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 		step, bucket = 24*time.Hour, "day"
 	}
 	where, args := rangeClause(cid, from, to)
-	rows, err := s.historyRows(ctx, where, args...)
+	rows, err := s.historyRows(ctx, historyFrom+where, args...)
 	if err != nil {
 		return model.Insights{}, err
 	}
@@ -453,7 +463,7 @@ func (s *Store) Threads(ctx context.Context, cid int64, limit int, from, to time
 		limit = 50
 	}
 	where, args := rangeClause(cid, from, to)
-	rows, err := s.historyRows(ctx, where+` AND h.request_body IS NOT NULL`, args...)
+	rows, err := s.historyRows(ctx, historyFrom+where+` AND h.request_body IS NOT NULL`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +493,7 @@ func (s *Store) Thread(ctx context.Context, cid int64, thread string) (model.Thr
 	if err := s.ensureThreads(ctx, cid); err != nil {
 		return model.ThreadDetail{}, err
 	}
-	rows, err := s.historyRows(ctx, `WHERE b.thread=? AND h.collection_id=?`, thread, cid)
+	rows, err := s.historyRows(ctx, threadFrom+`WHERE b.thread=? AND h.collection_id=?`, thread, cid)
 	if err != nil {
 		return model.ThreadDetail{}, err
 	}
@@ -510,10 +520,14 @@ func (s *Store) Thread(ctx context.Context, cid int64, thread string) (model.Thr
 	return out, nil
 }
 
-// nearestLimit and nearestThreshold bound Nearest's candidates.
+// nearestLimit and nearestThreshold bound Nearest's candidates. Requests up
+// to fineLimit bytes are compared with fine chunks (see fineChunks), at most
+// fineCandidates recordings per call.
 const (
 	nearestLimit     = 5
 	nearestThreshold = 0.2
+	fineLimit        = 16 << 10
+	fineCandidates   = 300
 )
 
 func manifestIDs(manifest []byte) ([]int64, error) {
@@ -529,11 +543,61 @@ func manifestIDs(manifest []byte) ([]int64, error) {
 	return out, nil
 }
 
+// fineChunks splits b at content-defined boundaries about every 64 bytes
+// (16 to 256) and returns each chunk's hash and length. Stored chunks average
+// 8 KiB, so a small request is a single stored chunk and any edit makes it
+// share nothing; these finer chunks keep similarity meaningful there.
+func fineChunks(b []byte) (hashes []uint64, sizes []int) {
+	const minSize, maxSize, mask = 16, 256, 1<<6 - 1
+	for len(b) > 0 {
+		n := len(b)
+		if n > minSize {
+			var h uint64
+			end := min(n, maxSize)
+			n = end
+			for i := minSize; i < end; i++ {
+				h = h<<1 + gear[b[i]]
+				if h&mask == 0 {
+					n = i + 1
+					break
+				}
+			}
+		}
+		f := fnv.New64a()
+		f.Write(b[:n])
+		hashes, sizes = append(hashes, f.Sum64()), append(sizes, n)
+		b = b[n:]
+	}
+	return
+}
+
+// fineSimilarity is the share of a's bytes, by fine chunk, also found in b.
+func fineSimilarity(aHashes []uint64, aSizes []int, b []byte) float64 {
+	bHashes, _ := fineChunks(b)
+	present := make(map[uint64]bool, len(bHashes))
+	for _, h := range bHashes {
+		present[h] = true
+	}
+	var shared, total int
+	for i, h := range aHashes {
+		total += aSizes[i]
+		if present[h] {
+			shared += aSizes[i]
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(shared) / float64(total)
+}
+
 // Nearest suggests the recordings a history request most likely meant: those
 // whose active request continues the same thread, then those sharing the most
 // request bytes. Similarity is the share of the history request's bytes, by
-// stored chunk, that the recording's active request also contains, so no body
-// is read or parsed. A recording with exactly the row's key is excluded.
+// stored chunk, that the recording's active request also contains, so large
+// bodies are never read or parsed. A small request (fineLimit) is also
+// compared with fine chunks against recordings of the same route and model,
+// keeping the higher share. A recording with exactly the row's key is excluded.
 func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCandidate, error) {
 	var cid int64
 	var key, route string
@@ -550,7 +614,8 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		return out, nil
 	}
 	var manifest []byte
-	if err = s.db.QueryRowContext(ctx, "SELECT chunks FROM bodies WHERE id=?", body.Int64).Scan(&manifest); err != nil {
+	var bodySize int64
+	if err = s.db.QueryRowContext(ctx, "SELECT chunks,size FROM bodies WHERE id=?", body.Int64).Scan(&manifest, &bodySize); err != nil {
 		return nil, err
 	}
 	chunkIDs, err := manifestIDs(manifest)
@@ -582,10 +647,11 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	}
 	type candidate struct {
 		model.NearestCandidate
-		body int64
+		body, size int64
+		route      string
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks FROM recordings r
- JOIN revisions v ON v.id=r.active_revision_id JOIN bodies b ON b.id=v.request_body WHERE r.collection_id=?`, cid)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size FROM recordings r
+ JOIN revisions v ON v.id=r.active_revision_id JOIN bodies b ON b.id=v.request_body WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
 		return nil, err
 	}
@@ -593,9 +659,9 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	need := map[int64]string{body.Int64: route}
 	for rows.Next() {
 		var c candidate
-		var recKey, recRoute string
+		var recKey string
 		var recManifest []byte
-		if err = rows.Scan(&c.RecordingID, &recKey, &recRoute, &c.body, &recManifest); err != nil {
+		if err = rows.Scan(&c.RecordingID, &recKey, &c.route, &c.body, &recManifest, &c.size); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -621,7 +687,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 			c.Similarity = float64(shared) / float64(total)
 		}
 		all = append(all, c)
-		need[c.body] = recRoute
+		need[c.body] = c.route
 	}
 	if err = rows.Close(); err != nil {
 		return nil, err
@@ -630,9 +696,30 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	if err != nil {
 		return nil, err
 	}
-	thread := ""
+	var own model.RequestSummary
 	if v := sums[body.Int64]; v != nil {
-		thread = v.Thread
+		own = *v
+	}
+	if bodySize <= fineLimit {
+		raw, err := loadBody(ctx, s.db, body.Int64)
+		if err != nil {
+			return nil, err
+		}
+		hashes, lengths := fineChunks(raw)
+		loads := 0
+		for i := range all {
+			c := &all[i]
+			v := sums[c.body]
+			if loads == fineCandidates || c.route != route || v == nil || v.Model != own.Model || c.size > 4*fineLimit || c.Similarity == 1 {
+				continue
+			}
+			loads++
+			other, err := loadBody(ctx, s.db, c.body)
+			if err != nil {
+				return nil, err
+			}
+			c.Similarity = max(c.Similarity, fineSimilarity(hashes, lengths, other))
+		}
 	}
 	kept := all[:0]
 	for _, c := range all {
@@ -641,7 +728,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 			c.Preview, c.Model, c.Items = v.Preview, v.Model, v.Items
 		}
 		switch {
-		case thread != "" && v != nil && v.Thread == thread:
+		case own.Thread != "" && v != nil && v.Thread == own.Thread:
 			c.Reason = "same_thread"
 		case c.Similarity >= nearestThreshold:
 			c.Reason = "shared_content"
