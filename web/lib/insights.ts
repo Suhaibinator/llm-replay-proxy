@@ -647,7 +647,7 @@ export function routeRows(routes: Insights["routes"]): RouteRow[] {
     .sort((a, b) => b.requests - a.requests || a.route.localeCompare(b.route))
     .map((r) => ({
       ...r,
-      hitRate: hitRate(r as RouteRow),
+      hitRate: hitRate(r),
       share: total ? r.requests / total : 0,
     }));
 }
