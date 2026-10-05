@@ -271,8 +271,6 @@ function fixture(route, streaming) {
       key: "viewer-key",
       route,
       streaming,
-      request: requestFixture(route, streaming),
-      matching_input: {},
       upstream_identity: "fixture",
       active_revision_id: 1,
       created_at: "2026-09-17T12:00:00Z",
@@ -289,7 +287,30 @@ function fixture(route, streaming) {
       source: "recorded",
       created_at: "2026-09-17T12:00:00Z",
     },
+    request_text: JSON.stringify(requestFixture(route, streaming)),
+    matching_input_text: "{}",
     text_unavailable_reason: "Tool calls require the advanced editor.",
+  };
+}
+
+// The recordings list carries a request summary, never the request itself.
+function listed(entry) {
+  return {
+    ...entry.recording,
+    request: {
+      model: "fixture-model",
+      items: 4,
+      preview: "Find Paris",
+      tool_calls: 1,
+      images: 1,
+      bytes: entry.request_text.length,
+      thread: "0011223344556677",
+    },
+    updated_at: entry.recording.created_at,
+    source: "recorded",
+    revisions: 1,
+    hits: 0,
+    last_hit_at: "",
   };
 }
 
@@ -314,6 +335,7 @@ for (const route of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
                 active_collection_id: 1,
                 first_event_delay_ms: 0,
                 delay_multiplier: 0,
+                history_limit: 10000,
               }
             : path === "/api/collections"
               ? [
@@ -325,7 +347,7 @@ for (const route of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
                   },
                 ]
               : path === "/api/recordings"
-                ? [entry.recording]
+                ? [listed(entry)]
                 : path === "/api/recordings/1"
                   ? entry
                   : path === "/api/analytics"

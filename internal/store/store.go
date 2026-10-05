@@ -42,7 +42,7 @@ func sqliteFileURL(path string) string { return (&url.URL{Scheme: "file", Path: 
 
 // schemaVersion is stored in PRAGMA user_version. A database or snapshot in
 // any other format is refused rather than migrated.
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schema = `
 PRAGMA foreign_keys=ON;
@@ -52,13 +52,13 @@ CREATE TABLE IF NOT EXISTS collections (
 CREATE TABLE IF NOT EXISTS settings (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT NOT NULL,
  active_collection_id INTEGER NOT NULL REFERENCES collections(id),
- first_event_delay_ms INTEGER NOT NULL, delay_multiplier REAL NOT NULL
+ first_event_delay_ms INTEGER NOT NULL, delay_multiplier REAL NOT NULL, history_limit INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chunks (
  id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, codec INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bodies (
- id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, size INTEGER NOT NULL, chunks BLOB NOT NULL
+ id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, size INTEGER NOT NULL, chunks BLOB NOT NULL, summary TEXT
 );
 CREATE TABLE IF NOT EXISTS recordings (
  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS history_collection_created ON history(collection_id,id DESC);
 CREATE INDEX IF NOT EXISTS revisions_recording ON revisions(recording_id,id DESC);
 CREATE INDEX IF NOT EXISTS history_collection_time ON history(collection_id,created_at);
+CREATE INDEX IF NOT EXISTS history_recording ON history(recording_id) WHERE recording_id<>0;
 `
 
 func Open(path string) (*Store, error) {
@@ -160,7 +161,7 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO settings(singleton,mode,active_collection_id,first_event_delay_ms,delay_multiplier) VALUES(1,'replay',?,0,1)`, id)
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO settings(singleton,mode,active_collection_id,first_event_delay_ms,delay_multiplier,history_limit) VALUES(1,'replay',?,0,1,?)`, id, DefaultHistoryLimit)
 	if err != nil {
 		return err
 	}
@@ -236,7 +237,7 @@ func (s *Store) Collection(ctx context.Context, id int64) (model.Collection, err
 
 func (s *Store) Settings(ctx context.Context) (model.Settings, error) {
 	var v model.Settings
-	err := s.db.QueryRowContext(ctx, "SELECT mode,active_collection_id,first_event_delay_ms,delay_multiplier FROM settings WHERE singleton=1").Scan(&v.Mode, &v.ActiveCollectionID, &v.FirstEventDelayMS, &v.DelayMultiplier)
+	err := s.db.QueryRowContext(ctx, "SELECT mode,active_collection_id,first_event_delay_ms,delay_multiplier,history_limit FROM settings WHERE singleton=1").Scan(&v.Mode, &v.ActiveCollectionID, &v.FirstEventDelayMS, &v.DelayMultiplier, &v.HistoryLimit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -252,7 +253,10 @@ func (s *Store) SetSettings(ctx context.Context, v model.Settings) error {
 	if math.IsNaN(v.DelayMultiplier) || math.IsInf(v.DelayMultiplier, 0) || v.DelayMultiplier < 0 || v.DelayMultiplier > 1_000_000 {
 		return errors.New("delay multiplier must be finite and between 0 and 1000000")
 	}
-	r, err := s.db.ExecContext(ctx, "UPDATE settings SET mode=?,active_collection_id=?,first_event_delay_ms=?,delay_multiplier=? WHERE singleton=1", v.Mode, v.ActiveCollectionID, v.FirstEventDelayMS, v.DelayMultiplier)
+	if v.HistoryLimit < 0 || v.HistoryLimit > MaxHistoryLimit {
+		return fmt.Errorf("history limit must be between 0 and %d", MaxHistoryLimit)
+	}
+	r, err := s.db.ExecContext(ctx, "UPDATE settings SET mode=?,active_collection_id=?,first_event_delay_ms=?,delay_multiplier=?,history_limit=? WHERE singleton=1", v.Mode, v.ActiveCollectionID, v.FirstEventDelayMS, v.DelayMultiplier, v.HistoryLimit)
 	if err != nil {
 		return err
 	}
@@ -437,42 +441,6 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	return model.Entry{Recording: rec, Revision: rev}, nil
 }
 
-// Recordings lists a collection with each recording's request (searchable in
-// the console) but without matching input, which is derived on Get.
-func (s *Store) Recordings(ctx context.Context, cid int64) ([]model.Recording, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT r.id,r.collection_id,r.key,r.route,r.upstream_identity,r.streaming,r.active_revision_id,r.created_at,v.request_body FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.collection_id=? ORDER BY r.id DESC", cid)
-	if err != nil {
-		return nil, err
-	}
-	out := []model.Recording{}
-	var bodies []sql.NullInt64
-	for rows.Next() {
-		var r model.Recording
-		var stream int
-		var active, body sql.NullInt64
-		if err = rows.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &r.UpstreamIdentity, &stream, &active, &r.CreatedAt, &body); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		r.Streaming, r.ActiveRevisionID = stream != 0, active.Int64
-		out = append(out, r)
-		bodies = append(bodies, body)
-	}
-	if err = rows.Close(); err != nil {
-		return nil, err
-	}
-	cache := bodyCache{}
-	for i := range out {
-		if !bodies[i].Valid {
-			continue // no active revision
-		}
-		if out[i].Request, err = cache.load(ctx, s.db, bodies[i]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
 // derived recomputes matching input for display; it is never stored.
 type derived struct {
 	route, identity string
@@ -620,59 +588,6 @@ func (s *Store) AddHistory(ctx context.Context, h model.History) error {
 		return err
 	}
 	return tx.Commit()
-}
-
-const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome"
-
-func scanHistory(row interface{ Scan(...any) error }) (h model.History, body sql.NullInt64, err error) {
-	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus)
-	return
-}
-
-func (s *Store) History(ctx context.Context, cid int64, limit int) ([]model.History, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+historyCols+" FROM history WHERE collection_id=? ORDER BY id DESC LIMIT ?", cid, limit)
-	if err != nil {
-		return nil, err
-	}
-	out := []model.History{}
-	var bodies []sql.NullInt64
-	for rows.Next() {
-		h, body, e := scanHistory(rows)
-		if e != nil {
-			rows.Close()
-			return nil, e
-		}
-		out = append(out, h)
-		bodies = append(bodies, body)
-	}
-	if err = rows.Close(); err != nil {
-		return nil, err
-	}
-	cache := bodyCache{}
-	for i := range out {
-		if out[i].Request, err = cache.load(ctx, s.db, bodies[i]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
-func (s *Store) HistoryItem(ctx context.Context, id int64) (model.History, error) {
-	h, body, err := scanHistory(s.db.QueryRowContext(ctx, "SELECT "+historyCols+" FROM history WHERE id=?", id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return h, ErrNotFound
-	}
-	if err != nil {
-		return h, err
-	}
-	h.Request, err = bodyCache{}.load(ctx, s.db, body)
-	return h, err
 }
 
 // Analytics aggregates the complete matching history range. Legacy rows keep
