@@ -14,7 +14,7 @@ export function TooltipContent({
       <T.Content
         sideOffset={sideOffset}
         className={cn(
-          "z-50 rounded-md bg-foreground px-2.5 py-1.5 text-xs text-background shadow-md",
+          "z-50 max-w-xs rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-card-foreground shadow-lg",
           className,
         )}
         {...p}

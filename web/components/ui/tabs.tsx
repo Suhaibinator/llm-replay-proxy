@@ -32,6 +32,10 @@ export function Tabs({
     </Visited.Provider>
   );
 }
+/**
+ * Tabs read as a row of labels on a rule, with the active one underlined in
+ * the primary color; pills would compete with the segmented mode switch.
+ */
 export function TabsList({
   className,
   ...p
@@ -39,7 +43,7 @@ export function TabsList({
   return (
     <T.List
       className={cn(
-        "inline-flex h-9 items-center rounded-lg bg-muted p-1",
+        "flex h-9 max-w-full items-end gap-1 overflow-x-auto border-b border-border",
         className,
       )}
       {...p}
@@ -53,7 +57,7 @@ export function TabsTrigger({
   return (
     <T.Trigger
       className={cn(
-        "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium text-muted-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm",
+        "-mb-px inline-flex h-9 items-center justify-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-2.5 text-sm font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:border-primary data-[state=active]:text-foreground",
         className,
       )}
       {...p}
