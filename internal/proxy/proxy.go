@@ -314,6 +314,10 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	revision := model.Revision{Status: resp.StatusCode, Headers: headers, Source: "recorded"}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
 	var readErr error
+	hungUpAfterCompletion := false
+	// incompleteAtHangup explains why a stream the caller abandoned was not
+	// complete, since the cancellation error alone does not say.
+	var incompleteAtHangup error
 	if streaming {
 		parser := newSSEParser()
 		var captured int64
@@ -356,6 +360,21 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 				break
 			}
 		}
+		// SDKs such as openai-go stop reading at the terminal event and close
+		// the connection while the upstream is still ending its body. Every
+		// captured frame already reached the caller, so a capture that is a
+		// complete protocol response is recorded rather than reported as
+		// interrupted. A stream cut short still fails validation.
+		if success && readErr != nil && clientGone(r.Context(), readErr) && !parser.Overflow() && !captureOverflow {
+			if parser.Pending() {
+				incompleteAtHangup = errors.New("an SSE frame was partially received")
+			} else if err := protocol.Validate(r.URL.Path, streaming, revision); err != nil {
+				incompleteAtHangup = err
+			} else {
+				hungUpAfterCompletion = true
+				readErr = nil
+			}
+		}
 		// Error statuses carry provider error bodies (usually JSON), which are
 		// forwarded as received; SSE framing only applies to successful streams.
 		if success && readErr == nil {
@@ -389,6 +408,9 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		if readErr != nil {
 			details = append(details, readErr.Error())
 		}
+		if incompleteAtHangup != nil {
+			details = append(details, "stream incomplete at disconnect", incompleteAtHangup.Error())
+		}
 		outcome := "error"
 		if clientGone(r.Context(), readErr) {
 			outcome = "interrupted"
@@ -400,22 +422,38 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		history("incomplete", err.Error(), 0)
 		return
 	}
-	if err := r.Context().Err(); err != nil {
+	publishCtx := r.Context()
+	if streaming {
+		// Callers hang up as soon as they read the terminal event, which races
+		// both the upstream ending its body and this publication. A complete
+		// stream is therefore published independently of the caller.
+		var cancel context.CancelFunc
+		publishCtx, cancel = context.WithTimeout(context.WithoutCancel(r.Context()), streamPublishTimeout)
+		defer cancel()
+	} else if err := r.Context().Err(); err != nil {
 		history("interrupted", err.Error(), 0)
 		return
 	}
 	recording := model.Recording{CollectionID: collectionID, Key: key, Route: r.URL.Path, Request: clone(original), MatchingInput: clone(canonical), UpstreamIdentity: identity, Streaming: streaming}
-	entry, err := h.db.Publish(r.Context(), recording, revision)
+	entry, err := h.db.Publish(publishCtx, recording, revision)
 	if err != nil {
 		outcome := "error"
-		if clientGone(r.Context(), err) {
+		if clientGone(publishCtx, err) {
 			outcome = "interrupted"
 		}
 		history(outcome, err.Error(), 0)
 		return
 	}
-	history("recorded", "", entry.Recording.ID)
+	detail := ""
+	if streaming && (hungUpAfterCompletion || r.Context().Err() != nil) {
+		detail = "caller disconnected after the complete stream"
+	}
+	history("recorded", detail, entry.Recording.ID)
 }
+
+// streamPublishTimeout bounds publication of a complete stream, which no
+// longer follows the caller's context.
+const streamPublishTimeout = 30 * time.Second
 
 // errClientWrite marks a failed write to the caller's connection, which only
 // happens once the caller has gone away.
