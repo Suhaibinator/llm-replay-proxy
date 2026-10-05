@@ -126,7 +126,7 @@ func TestImportFailsOnSourceIterationErrors(t *testing.T) {
 		{"recordings", func(t *testing.T, s *Store, cid int64) {
 			publishOne(t, s, testRecording(cid, "a"), testRevision("resp_a", "recorded"))
 			publishOne(t, s, testRecording(cid, "b"), testRevision("resp_b", "recorded"))
-		}, failingView("recordings", "id,collection_id,key,route,request,matching_input,upstream_identity,streaming,active_revision_id", "created_at")},
+		}, failingView("recordings", "id,collection_id,key,route,upstream_identity,streaming,active_revision_id", "created_at")},
 		{"revisions", func(t *testing.T, s *Store, cid int64) {
 			first := publishOne(t, s, testRecording(cid, "a"), testRevision("resp_a", "recorded"))
 			publishOne(t, s, testRecording(cid, "a"), testRevision("resp_a2", "edited"))
@@ -134,7 +134,7 @@ func TestImportFailsOnSourceIterationErrors(t *testing.T) {
 			if _, err := s.Restore(context.Background(), first.Recording.ID, first.Revision.ID); err != nil {
 				t.Fatal(err)
 			}
-		}, failingView("revisions", "id,recording_id,status,headers,body,events,request,matching_input,source", "created_at")},
+		}, failingView("revisions", "id,recording_id,status,headers,body,events,request_body,source", "created_at")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := exportWith(t, func(s *Store, cid int64) { tc.setup(t, s, cid) }, tc.mutations...)
@@ -187,7 +187,7 @@ func TestImportNormalisesNullJSONAndTrimsNames(t *testing.T) {
 	ctx := context.Background()
 	path := exportWith(t, func(s *Store, cid int64) {
 		publishOne(t, s, chatRecording(cid), chatRevision())
-	}, `UPDATE collections SET name='  spaced  ', exclusions='null'`, `UPDATE revisions SET headers='null', events='null'`)
+	}, `UPDATE collections SET name='  spaced  ', exclusions='null'`, `UPDATE revisions SET headers='null'`)
 	dest := openTest(t)
 	cols, err := dest.Import(ctx, path)
 	if err != nil {
@@ -196,15 +196,15 @@ func TestImportNormalisesNullJSONAndTrimsNames(t *testing.T) {
 	if len(cols) != 1 || cols[0].Name != "spaced" || cols[0].Exclusions == nil {
 		t.Fatalf("imported collection: %+v", cols)
 	}
-	var exclusions, headers, events string
+	var exclusions, headers string
 	if err = dest.db.QueryRow("SELECT exclusions FROM collections WHERE id=?", cols[0].ID).Scan(&exclusions); err != nil {
 		t.Fatal(err)
 	}
-	if err = dest.db.QueryRow("SELECT v.headers,v.events FROM revisions v JOIN recordings r ON r.id=v.recording_id WHERE r.collection_id=?", cols[0].ID).Scan(&headers, &events); err != nil {
+	if err = dest.db.QueryRow("SELECT v.headers FROM revisions v JOIN recordings r ON r.id=v.recording_id WHERE r.collection_id=?", cols[0].ID).Scan(&headers); err != nil {
 		t.Fatal(err)
 	}
-	if exclusions != "[]" || headers != "{}" || events != "[]" {
-		t.Fatalf("stored exclusions=%s headers=%s events=%s", exclusions, headers, events)
+	if exclusions != "[]" || headers != "{}" {
+		t.Fatalf("stored exclusions=%s headers=%s", exclusions, headers)
 	}
 	listed, err := dest.Collections(ctx)
 	if err != nil {

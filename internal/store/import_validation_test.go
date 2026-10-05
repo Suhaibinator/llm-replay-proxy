@@ -9,11 +9,17 @@ import (
 
 func TestImportRejectsCorruptionWithoutPartialCollections(t *testing.T) {
 	for _, tc := range []struct{ name, mutation string }{
-		{"matching key", `UPDATE recordings SET key='forged'`},
+		{"matching key", `UPDATE recordings SET key='forged' WHERE id=(SELECT min(id) FROM recordings)`},
 		{"matching rules", `UPDATE collections SET exclusions='["/stream"]'`},
-		{"incomplete stream", `UPDATE revisions SET events='[]'`},
+		{"incomplete stream", `UPDATE revisions SET events=X'28b52ffd04581100005b5d561f7f61'`},
+		{"unreadable events", `UPDATE revisions SET events='[]'`},
 		{"response headers", `UPDATE revisions SET headers='{"Set-Cookie":"session=forged"}'`},
-		{"provenance", `UPDATE revisions SET request='{"stream":true,"input":"changed"}'`},
+		{"provenance", `UPDATE revisions SET request_body=(SELECT max(request_body) FROM revisions)`},
+		{"chunk bytes", `UPDATE chunks SET data=zeroblob(length(data))`},
+		{"body hash", `UPDATE bodies SET hash=zeroblob(32) WHERE id=(SELECT min(id) FROM bodies)`},
+		{"chunk list", `UPDATE bodies SET chunks=X'ff'`},
+		{"chunk size", `UPDATE chunks SET size=size+1`},
+		{"storage format", `PRAGMA user_version=1`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -23,6 +29,9 @@ func TestImportRejectsCorruptionWithoutPartialCollections(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err = source.Publish(ctx, testRecording(settings.ActiveCollectionID, "original"), testRevision("resp_original", "recorded")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = source.Publish(ctx, testRecording(settings.ActiveCollectionID, "other"), testRevision("resp_other", "recorded")); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(t.TempDir(), "snapshot.sqlite")
