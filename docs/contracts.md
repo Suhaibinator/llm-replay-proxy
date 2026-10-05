@@ -26,13 +26,15 @@ issues, refreshes, lists, or revokes tokens.
 
 | Endpoint | Method | Request / result |
 | --- | --- | --- |
-| `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `delay_multiplier` |
+| `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `delay_multiplier`, `history_limit` |
 | `/api/collections` | GET, POST | POST `{name, exclusions}`; matching rules remain immutable |
-| `/api/recordings?collection_id=N` | GET | Recording summaries |
-| `/api/recordings/N` | GET | Active recording/revision, all revisions, editable text and unavailability reason, exact `request_text` and `matching_input_text` |
+| `/api/collections/N` | DELETE | 204; deletes the collection, its recordings and its history. 409 `collection_active` for the active collection |
+| `/api/recordings?collection_id=N` | GET | Recordings, newest first, each with a request summary (`request`), `updated_at`, active revision `source`, `revisions`, `hits` and `last_hit_at` |
+| `/api/recordings/N` | GET, DELETE | GET: active recording/revision, all revisions, editable text and unavailability reason, exact `request_text` and `matching_input_text`. DELETE: 204; removes the recording and its revisions |
 | `/api/recordings/N/edit` | POST | `{text, base_revision_id}` or `{revision, base_revision_id}` |
 | `/api/recordings/N/restore` | POST | `{revision_id, base_revision_id}` |
-| `/api/history?collection_id=N` | GET | History including exact `request_text`; optional `limit` up to 1000 |
+| `/api/history?collection_id=N` | GET, DELETE | GET: newest calls with a request summary (`request`, null without a body); optional `limit` up to 1000 and `after_id` for rows newer than an id. DELETE: 204; clears the collection's history |
+| `/api/history/N` | GET | One call with its exact `request_text` |
 | `/api/analytics?collection_id=N&from=RFC3339&to=RFC3339` | GET | Complete history aggregates, UTC series, hit rate, and source-specific timing percentiles |
 | `/api/collections/N/export` | GET | SQLite snapshot attachment: the collection, recordings, and revisions; request history is never included |
 | `/api/import` | POST | Raw SQLite snapshot bytes; 422 `invalid_import` for an invalid snapshot |
@@ -53,6 +55,18 @@ reassemble to its recorded hash, blank (after trimming) collection names and `cr
 are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions or
 revision headers are stored as empty values. Request history in a
 snapshot is ignored.
+
+Request bytes appear only as exact text in `request_text` (recording detail and
+history item); lists and revisions never carry them, and an edit that supplies
+`request` or `matching_input` is rejected. A request summary has `model`,
+`items` (messages or Responses input items), `preview` (the start of the last
+user-written text), `tool_calls`, `images`, `bytes`, and `thread`, a fingerprint
+of the conversation's opening shared by its later turns. Summaries are computed
+when a list first needs them, not when a request is recorded.
+
+`history_limit` (default 10000, 0 keeps everything) is the number of history
+rows kept per collection; older rows are deleted at startup and every 10
+minutes. Deletes reclaim request storage no remaining row references.
 
 Analytics uses a half-open `[from,to)` interval, defaults to the last 24 hours,
 and accepts ranges up to 366 days. `lifetime_total` is independent of that

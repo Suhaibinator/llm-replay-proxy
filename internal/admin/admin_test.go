@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -217,18 +218,31 @@ func TestAnalyticsEndpointValidationAndFullHistory(t *testing.T) {
 func TestAdvancedEditCannotChangeRequestProvenance(t *testing.T) {
 	db, h := testAdmin(t)
 	e := publishFixture(t, db)
-	changed := e.Revision
-	changed.Request = json.RawMessage(`{"large":9007199254740992}`)
-	changed.MatchingInput = json.RawMessage(`{"tampered":true}`)
+	var changed map[string]any
+	b, _ := json.Marshal(e.Revision)
+	if err := json.Unmarshal(b, &changed); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := changed["request"]; ok {
+		t.Fatal("revisions expose request bytes")
+	}
+	for field, value := range map[string]any{"request": map[string]any{"large": 9007199254740992}, "matching_input": map[string]any{"tampered": true}} {
+		tampered := maps.Clone(changed)
+		tampered[field] = value
+		w := request(t, h, http.MethodPost, "/api/recordings/"+itoa(e.Recording.ID)+"/edit", map[string]any{"revision": tampered, "base_revision_id": e.Revision.ID})
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("edit carrying %s: %d %s", field, w.Code, w.Body.String())
+		}
+	}
 	w := request(t, h, http.MethodPost, "/api/recordings/"+itoa(e.Recording.ID)+"/edit", map[string]any{"revision": changed, "base_revision_id": e.Revision.ID})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("advanced edit: %d %s", w.Code, w.Body.String())
 	}
-	var got model.Entry
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+	got, err := db.Get(context.Background(), e.Recording.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.Revision.Request) != string(e.Revision.Request) || string(got.Revision.MatchingInput) != string(e.Revision.MatchingInput) {
+	if got.Revision.ID == e.Revision.ID || string(got.Revision.Request) != string(e.Revision.Request) || string(got.Revision.MatchingInput) != string(e.Revision.MatchingInput) {
 		t.Fatalf("provenance changed: request=%s matching=%s", got.Revision.Request, got.Revision.MatchingInput)
 	}
 }
@@ -271,3 +285,70 @@ func TestInspectRawPrecisionAndRevisionConflicts(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+func TestListsCarrySummariesAndDetailsCarryRequestOnce(t *testing.T) {
+	db, h := testAdmin(t)
+	e := publishFixture(t, db)
+	cid := itoa(e.Recording.CollectionID)
+	marker := `"large":9007199254740993123456789`
+	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: e.Recording.Key, Request: e.Recording.Request, Outcome: "hit", RecordingID: e.Recording.ID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/api/recordings?collection_id=" + cid, "/api/history?collection_id=" + cid} {
+		w := request(t, h, http.MethodGet, target, nil)
+		if w.Code != 200 || strings.Contains(w.Body.String(), "9007199254740993123456789") || !strings.Contains(w.Body.String(), `"preview":"old"`) {
+			t.Fatalf("%s: %d %s", target, w.Code, w.Body.String())
+		}
+	}
+	w := request(t, h, http.MethodGet, "/api/recordings/"+itoa(e.Recording.ID), nil)
+	if n := strings.Count(w.Body.String(), "9007199254740993123456789"); n != 2 {
+		t.Fatalf("inspect carries the request %d times, want request_text and matching_input_text only", n)
+	}
+	var listed []model.History
+	w = request(t, h, http.MethodGet, "/api/history?collection_id="+cid, nil)
+	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil || len(listed) != 1 {
+		t.Fatalf("history: %v %s", err, w.Body.String())
+	}
+	w = request(t, h, http.MethodGet, "/api/history/"+itoa(listed[0].ID), nil)
+	var item struct {
+		RequestText string `json:"request_text"`
+		Outcome     string `json:"outcome"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &item); err != nil || item.Outcome != "hit" || !strings.Contains(item.RequestText, marker) {
+		t.Fatalf("history item: %d %s", w.Code, w.Body.String())
+	}
+	if w = request(t, h, http.MethodGet, "/api/history?collection_id="+cid+"&after_id="+itoa(listed[0].ID), nil); w.Body.String() != "[]\n" {
+		t.Fatalf("after_id: %s", w.Body.String())
+	}
+	if w = request(t, h, http.MethodGet, "/api/history?collection_id="+cid+"&after_id=-1", nil); w.Code != 400 {
+		t.Fatalf("invalid after_id: %d", w.Code)
+	}
+}
+
+func TestDeleteEndpoints(t *testing.T) {
+	db, h := testAdmin(t)
+	e := publishFixture(t, db)
+	cid := itoa(e.Recording.CollectionID)
+	if w := request(t, h, http.MethodDelete, "/api/collections/"+cid, nil); w.Code != 409 || !strings.Contains(w.Body.String(), "collection_active") {
+		t.Fatalf("delete active collection: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(t, h, http.MethodDelete, "/api/history?collection_id="+cid, nil); w.Code != 204 {
+		t.Fatalf("clear history: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(t, h, http.MethodDelete, "/api/recordings/"+itoa(e.Recording.ID), nil); w.Code != 204 {
+		t.Fatalf("delete recording: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(t, h, http.MethodGet, "/api/recordings/"+itoa(e.Recording.ID), nil); w.Code != 404 {
+		t.Fatalf("deleted recording: %d", w.Code)
+	}
+	other, err := db.CreateCollection(context.Background(), "other", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := request(t, h, http.MethodDelete, "/api/collections/"+itoa(other.ID), nil); w.Code != 204 {
+		t.Fatalf("delete collection: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(t, h, http.MethodDelete, "/api/collections/"+itoa(other.ID), nil); w.Code != 404 {
+		t.Fatalf("delete missing collection: %d", w.Code)
+	}
+}

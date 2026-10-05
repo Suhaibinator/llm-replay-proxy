@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Trash2,
   Activity,
   BarChart3,
   Archive,
@@ -59,6 +60,7 @@ import {
 } from "@/components/ui/tooltip";
 import { ResponseViewer } from "@/components/response-viewer";
 import { RequestViewer } from "@/components/request-viewer";
+import { formatBytes } from "@/lib/request-viewer";
 import { AuthGate, notifyAuthRequired } from "@/components/auth-required";
 import { cn } from "@/lib/utils";
 
@@ -73,7 +75,10 @@ type Settings = {
   active_collection_id: number;
   first_event_delay_ms: number;
   delay_multiplier: number;
+  history_limit: number;
 };
+type NumberSetting =
+  "first_event_delay_ms" | "delay_multiplier" | "history_limit";
 type Event = { data: string; offset_ms: number };
 type Revision = {
   id: number;
@@ -85,17 +90,32 @@ type Revision = {
   source: string;
   created_at: string;
 };
+type RequestSummary = {
+  model: string;
+  items: number;
+  preview: string;
+  tool_calls: number;
+  images: number;
+  bytes: number;
+  thread: string;
+};
 type Recording = {
   id: number;
   collection_id: number;
   key: string;
   route: string;
-  request: unknown;
-  matching_input: unknown;
   upstream_identity: string;
   streaming: boolean;
   active_revision_id: number;
   created_at: string;
+};
+type RecordingSummary = Recording & {
+  request: RequestSummary | null;
+  updated_at: string;
+  source: string;
+  revisions: number;
+  hits: number;
+  last_hit_at: string;
 };
 type Entry = {
   recording: Recording;
@@ -111,7 +131,7 @@ type History = {
   collection_id: number;
   route: string;
   key: string;
-  request: unknown;
+  request: RequestSummary | null;
   outcome: string;
   detail: string;
   recording_id: number;
@@ -173,6 +193,7 @@ const defaults: Settings = {
   active_collection_id: 0,
   first_event_delay_ms: 0,
   delay_multiplier: 1,
+  history_limit: 10000,
 };
 class APIError extends Error {
   code: string;
@@ -236,6 +257,10 @@ const download = (href: string) => {
   link.download = "";
   link.click();
 };
+const count = (n: number, one: string) =>
+  `${n.toLocaleString()} ${one}${n === 1 ? "" : "s"}`;
+// The history list shows the newest rows; the API's default page is 200.
+const HISTORY_ROWS = 200;
 const shortKey = (s: string) => (s ? `${s.slice(0, 8)}…${s.slice(-5)}` : "—");
 function Outcome({ value }: { value: string }) {
   const hit = /hit|recorded|success/i.test(value),
@@ -503,8 +528,9 @@ function AnalyticsDashboard({
 function App() {
   const [collections, setCollections] = useState<Collection[]>([]),
     [settings, setSettings] = useState<Settings>(defaults),
-    [recordings, setRecordings] = useState<Recording[]>([]),
+    [recordings, setRecordings] = useState<RecordingSummary[]>([]),
     [history, setHistory] = useState<History[]>([]),
+    [historyDetail, setHistoryDetail] = useState<History | null>(null),
     [analytics, setAnalytics] = useState<Analytics>(emptyAnalytics),
     [activeLifetime, setActiveLifetime] = useState(0);
   const [analyticsCollection, setAnalyticsCollection] = useState(0),
@@ -518,7 +544,23 @@ function App() {
     [settingsLoaded, setSettingsLoaded] = useState(false),
     [error, setError] = useState(""),
     [toast, setToast] = useState("");
-  const [historyDetail, setHistoryDetail] = useState<History | null>(null);
+  const historyRef = useRef<History[]>([]);
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+  const [historyRequest, setHistoryRequest] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
+  function openHistory(h: History) {
+    setHistoryDetail(h);
+    setHistoryRequest(null);
+    api<History>(`/api/history/${h.id}`)
+      .then((item) =>
+        setHistoryRequest({ id: h.id, text: item.request_text ?? "null" }),
+      )
+      .catch(fail);
+  }
   const [query, setQuery] = useState(""),
     [inspectOpen, setInspectOpen] = useState(false),
     [createOpen, setCreateOpen] = useState(false),
@@ -530,9 +572,7 @@ function App() {
     [inspectError, setInspectError] = useState(""),
     [createError, setCreateError] = useState(""),
     [revising, setRevising] = useState(false),
-    [drafts, setDrafts] = useState<
-      Partial<Record<"first_event_delay_ms" | "delay_multiplier", string>>
-    >({});
+    [drafts, setDrafts] = useState<Partial<Record<NumberSetting, string>>>({});
   const fileRef = useRef<HTMLInputElement>(null);
   const inspectTriggerRef = useRef<HTMLButtonElement | null>(null);
   const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -657,7 +697,7 @@ function App() {
       }
       if (ss.active_collection_id) {
         const [rs, hs] = await Promise.all([
-          api<Recording[]>(
+          api<RecordingSummary[]>(
             `/api/recordings?collection_id=${ss.active_collection_id}`,
           ),
           api<History[]>(
@@ -713,17 +753,23 @@ function App() {
       try {
         const version = collectionVersion.current,
           fullVersion = loadVersion.current;
+        // History rows never change, so the poll asks only for new ones.
+        const newest = historyRef.current[0]?.id ?? 0;
         const [rs, hs] = await Promise.all([
-          api<Recording[]>(`/api/recordings?collection_id=${cid}`),
-          api<History[]>(`/api/history?collection_id=${cid}`),
+          api<RecordingSummary[]>(`/api/recordings?collection_id=${cid}`),
+          api<History[]>(
+            `/api/history?collection_id=${cid}${newest ? `&after_id=${newest}` : ""}`,
+          ),
         ]);
         if (
           settingsRef.current.active_collection_id === cid &&
           collectionVersion.current === version &&
-          loadVersion.current === fullVersion
+          loadVersion.current === fullVersion &&
+          (historyRef.current[0]?.id ?? 0) === newest
         ) {
           setRecordings(rs);
-          setHistory(hs);
+          if (hs.length)
+            setHistory((current) => [...hs, ...current].slice(0, HISTORY_ROWS));
         }
         if (
           analyticsCollectionRef.current === analyticsCID &&
@@ -760,7 +806,9 @@ function App() {
         return;
       }
       const [rs, hs] = await Promise.all([
-        api<Recording[]>(`/api/recordings?collection_id=${collectionID}`),
+        api<RecordingSummary[]>(
+          `/api/recordings?collection_id=${collectionID}`,
+        ),
         api<History[]>(`/api/history?collection_id=${collectionID}`),
       ]);
       const totals = await api<Analytics>(analyticsURL(collectionID, "24h"));
@@ -838,7 +886,7 @@ function App() {
     settingsQueue.current = task.catch(() => undefined);
     return task;
   }
-  function commitNumber(field: "first_event_delay_ms" | "delay_multiplier") {
+  function commitNumber(field: NumberSetting) {
     const raw = drafts[field];
     setDrafts(({ [field]: _, ...rest }) => rest);
     if (raw === undefined) return;
@@ -847,14 +895,17 @@ function App() {
       raw.trim() !== "" &&
       Number.isFinite(value) &&
       value >= 0 &&
-      (field === "first_event_delay_ms"
-        ? Number.isInteger(value) && value <= 86_400_000
-        : value <= 1_000_000);
+      (field === "delay_multiplier"
+        ? value <= 1_000_000
+        : Number.isInteger(value) &&
+          value <= (field === "history_limit" ? 100_000_000 : 86_400_000));
     if (!valid) {
       setError(
         field === "first_event_delay_ms"
           ? "First event delay must be a whole number of milliseconds from 0 to 86400000"
-          : "Delay multiplier must be between 0 and 1000000",
+          : field === "history_limit"
+            ? "History limit must be a whole number from 0 (keep everything) to 100000000"
+            : "Delay multiplier must be between 0 and 1000000",
       );
       return;
     }
@@ -964,6 +1015,36 @@ function App() {
       setRevising(false);
     }
   }
+  async function deleteRecording() {
+    if (!selected || revising) return;
+    setRevising(true);
+    setInspectError("");
+    try {
+      await api(`/api/recordings/${selected.recording.id}`, {
+        method: "DELETE",
+      });
+      inspectVersion.current += 1;
+      inspectedID.current = 0;
+      setInspectOpen(false);
+      notify("Recording deleted");
+      await load();
+    } catch (e) {
+      failInspect(e);
+    } finally {
+      setRevising(false);
+    }
+  }
+  async function clearHistory() {
+    const cid = settingsRef.current.active_collection_id;
+    if (!cid) return;
+    try {
+      await api(`/api/history?collection_id=${cid}`, { method: "DELETE" });
+      notify("History cleared");
+      await load();
+    } catch (e) {
+      fail(e);
+    }
+  }
   async function compareRequest(raw: string, historyID?: number) {
     if (!selected) return;
     const version = ++compareVersion.current;
@@ -1016,7 +1097,7 @@ function App() {
   const filtered = useMemo(
     () =>
       recordings.filter((r) =>
-        `${r.route} ${r.key} ${pretty(r.request)}`
+        `${r.route} ${r.key} ${r.request?.model ?? ""} ${r.request?.preview ?? ""}`
           .toLowerCase()
           .includes(query.toLowerCase()),
       ),
@@ -1025,7 +1106,7 @@ function App() {
   const filteredHistory = useMemo(
     () =>
       history.filter((h) =>
-        `${h.route} ${h.key} ${h.outcome} ${h.detail} ${h.request_text || pretty(h.request)}`
+        `${h.route} ${h.key} ${h.outcome} ${h.detail} ${h.request?.model ?? ""} ${h.request?.preview ?? ""}`
           .toLowerCase()
           .includes(query.toLowerCase()),
       ),
@@ -1401,7 +1482,7 @@ function App() {
                     <Empty
                       icon={Search}
                       title="No matching recordings"
-                      body="Try a different route, key, or request field."
+                      body="Search matches the route, model, key, and last user message."
                     />
                   ) : filtered.length === 0 ? (
                     <Empty
@@ -1414,10 +1495,15 @@ function App() {
                       <table className="w-full text-left text-sm">
                         <thead className="border-b text-xs text-muted-foreground">
                           <tr>
-                            <th className="px-3 py-2 font-medium">Route</th>
-                            <th className="px-3 py-2 font-medium">Kind</th>
-                            <th className="px-3 py-2 font-medium">Key</th>
-                            <th className="px-3 py-2 font-medium">Recorded</th>
+                            <th className="w-full px-3 py-2 font-medium">
+                              Request
+                            </th>
+                            <th className="hidden px-3 py-2 font-medium sm:table-cell">
+                              Replays
+                            </th>
+                            <th className="hidden px-3 py-2 font-medium sm:table-cell">
+                              Updated
+                            </th>
                             <th />
                           </tr>
                         </thead>
@@ -1427,17 +1513,76 @@ function App() {
                               key={r.id}
                               className="border-b last:border-0 hover:bg-muted/50"
                             >
-                              <td className="px-3 py-3 font-medium">
-                                {r.route.replace("/v1/", "")}
+                              <td className="w-full max-w-0 px-3 py-3">
+                                <p
+                                  className={cn(
+                                    "truncate font-medium",
+                                    !r.request?.preview &&
+                                      "font-normal text-muted-foreground",
+                                  )}
+                                  title={r.request?.preview || undefined}
+                                >
+                                  {r.request?.preview || "No user message"}
+                                </p>
+                                <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                                  <span>{r.route.replace("/v1/", "")}</span>
+                                  <Badge>
+                                    {r.streaming ? "stream" : "json"}
+                                  </Badge>
+                                  {r.request?.model && (
+                                    <span className="font-medium text-foreground">
+                                      {r.request.model}
+                                    </span>
+                                  )}
+                                  {r.request && (
+                                    <span>
+                                      {count(r.request.items, "item")}
+                                    </span>
+                                  )}
+                                  {!!r.request?.tool_calls && (
+                                    <span>
+                                      {count(r.request.tool_calls, "tool call")}
+                                    </span>
+                                  )}
+                                  {!!r.request?.images && (
+                                    <span>
+                                      {count(r.request.images, "image")}
+                                    </span>
+                                  )}
+                                  {r.request && (
+                                    <span>{formatBytes(r.request.bytes)}</span>
+                                  )}
+                                  <span className="sm:hidden">
+                                    {r.hits
+                                      ? count(r.hits, "replay")
+                                      : "Not replayed"}
+                                  </span>
+                                  <span className="font-mono" title={r.key}>
+                                    {shortKey(r.key)}
+                                  </span>
+                                </p>
                               </td>
-                              <td className="px-3 py-3">
-                                <Badge>{r.streaming ? "stream" : "json"}</Badge>
+                              <td className="hidden whitespace-nowrap px-3 py-3 text-xs sm:table-cell">
+                                {r.hits ? (
+                                  <>
+                                    <p className="font-medium tabular-nums">
+                                      {count(r.hits, "replay")}
+                                    </p>
+                                    <p className="text-muted-foreground">
+                                      Last {date(r.last_hit_at)}
+                                    </p>
+                                  </>
+                                ) : (
+                                  <span className="text-muted-foreground">
+                                    Not replayed
+                                  </span>
+                                )}
                               </td>
-                              <td className="px-3 py-3 font-mono text-xs text-muted-foreground">
-                                {shortKey(r.key)}
-                              </td>
-                              <td className="px-3 py-3 text-xs text-muted-foreground">
-                                {date(r.created_at)}
+                              <td className="hidden whitespace-nowrap px-3 py-3 text-xs text-muted-foreground sm:table-cell">
+                                <p>{date(r.updated_at || r.created_at)}</p>
+                                {r.revisions > 1 && (
+                                  <p>{count(r.revisions, "revision")}</p>
+                                )}
                               </td>
                               <td className="px-3 py-3 text-right">
                                 <Button
@@ -1461,6 +1606,39 @@ function App() {
                   )}
                 </TabsContent>
                 <TabsContent value="history">
+                  <div className="mb-3 flex flex-wrap items-end gap-x-4 gap-y-3 border-b pb-3">
+                    <label className="text-xs font-medium">
+                      Requests kept per collection
+                      <Input
+                        className="mt-1.5 w-36"
+                        type="number"
+                        min="0"
+                        max="100000000"
+                        step="1"
+                        disabled={busy || !settingsLoaded}
+                        value={drafts.history_limit ?? settings.history_limit}
+                        onChange={(e) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            history_limit: e.target.value,
+                          }))
+                        }
+                        onBlur={() => commitNumber("history_limit")}
+                      />
+                    </label>
+                    <p className="max-w-[40ch] flex-1 pb-2 text-xs text-muted-foreground">
+                      Older requests are removed every 10 minutes. 0 keeps
+                      everything.
+                    </p>
+                    {history.length > 0 && (
+                      <ConfirmAction
+                        label="Clear history"
+                        prompt="Delete every logged request in this collection? Recordings are kept."
+                        disabled={busy}
+                        onConfirm={() => void clearHistory()}
+                      />
+                    )}
+                  </div>
                   {history.length === 0 ? (
                     <Empty
                       icon={HistoryIcon}
@@ -1471,7 +1649,7 @@ function App() {
                     <Empty
                       icon={Search}
                       title="No matching requests"
-                      body="Try a different route, outcome, detail, key, or request field."
+                      body="Search matches the route, outcome, detail, model, key, and last user message."
                     />
                   ) : (
                     <div className="space-y-1">
@@ -1484,7 +1662,7 @@ function App() {
                               void inspect(h.recording_id);
                             } else {
                               historyTriggerRef.current = event.currentTarget;
-                              setHistoryDetail(h);
+                              openHistory(h);
                             }
                           }}
                           className="flex w-full items-center gap-3 rounded-lg p-3 text-left outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
@@ -1492,10 +1670,17 @@ function App() {
                           <Outcome value={h.outcome} />
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-sm font-medium">
-                              {h.route}
+                              {h.request?.preview || h.route}
                             </p>
                             <p className="truncate text-xs text-muted-foreground">
-                              {h.detail || shortKey(h.key)}
+                              {h.detail ||
+                                [
+                                  h.route.replace("/v1/", ""),
+                                  h.request?.model,
+                                  shortKey(h.key),
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
                             </p>
                           </div>
                           <time className="hidden text-xs text-muted-foreground sm:block">
@@ -1593,6 +1778,7 @@ function App() {
         setAdvanced={setAdvanced}
         edit={edit}
         restore={restore}
+        remove={deleteRecording}
         compare={compare}
         compareRequest={compareRequest}
         clearCompare={clearCompare}
@@ -1633,12 +1819,20 @@ function App() {
                   {historyDetail.detail}
                 </div>
               )}
-              <RequestViewer
-                route={historyDetail.route}
-                raw={
-                  historyDetail.request_text ?? pretty(historyDetail.request)
-                }
-              />
+              {historyRequest?.id === historyDetail.id ? (
+                <RequestViewer
+                  route={historyDetail.route}
+                  raw={historyRequest.text}
+                />
+              ) : (
+                <div
+                  className="flex h-32 items-center justify-center"
+                  role="status"
+                >
+                  <RefreshCw className="size-5 animate-spin text-muted-foreground" />
+                  <span className="sr-only">Loading request</span>
+                </div>
+              )}
               <p className="break-all font-mono text-xs text-muted-foreground">
                 Match key: {historyDetail.key}
               </p>
@@ -1668,6 +1862,7 @@ function Inspector({
   setAdvanced,
   edit,
   restore,
+  remove,
   compare,
   compareRequest,
   clearCompare,
@@ -1686,6 +1881,7 @@ function Inspector({
   setAdvanced: (x: string) => void;
   edit: (k: "text" | "advanced") => void;
   restore: (id: number) => void;
+  remove: () => void;
   compare: Diff[] | null;
   compareRequest: (raw: string, historyID?: number) => void;
   clearCompare: () => void;
@@ -1800,7 +1996,7 @@ function Inspector({
               <TabsContent value="request">
                 <RequestViewer
                   route={entry.recording.route}
-                  raw={entry.request_text ?? pretty(entry.recording.request)}
+                  raw={entry.request_text ?? ""}
                 />
               </TabsContent>
               <TabsContent
@@ -1809,12 +2005,12 @@ function Inspector({
               >
                 <Data
                   title="Original request"
-                  value={entry.recording.request}
+                  value={null}
                   raw={entry.request_text}
                 />
                 <Data
                   title="Matching input"
-                  value={entry.recording.matching_input}
+                  value={null}
                   raw={entry.matching_input_text}
                 />
                 <Data title="Response headers" value={entry.revision.headers} />
@@ -1943,6 +2139,18 @@ function Inspector({
                     </div>
                   ))}
                 </div>
+                <div className="mt-6 border-t pt-4">
+                  <ConfirmAction
+                    label="Delete recording"
+                    prompt={`Delete this recording and ${
+                      (entry.revisions?.length ?? 1) === 1
+                        ? "its revision"
+                        : `all ${entry.revisions?.length} revisions`
+                    }? Replay will miss this request until it is recorded again.`}
+                    disabled={saving}
+                    onConfirm={remove}
+                  />
+                </div>
               </TabsContent>
               <TabsContent value="compare">
                 <div className="space-y-3 rounded-lg border p-4">
@@ -2051,6 +2259,57 @@ function Inspector({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+// ConfirmAction asks inline before a destructive action, so it also works
+// inside a dialog.
+function ConfirmAction({
+  label,
+  prompt,
+  disabled,
+  onConfirm,
+}: {
+  label: string;
+  prompt: string;
+  disabled?: boolean;
+  onConfirm: () => void;
+}) {
+  const [asking, setAsking] = useState(false);
+  if (!asking)
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        className="text-red-700 hover:bg-red-50"
+        disabled={disabled}
+        onClick={() => setAsking(true)}
+      >
+        <Trash2 className="size-3.5" />
+        {label}
+      </Button>
+    );
+  return (
+    <div
+      role="group"
+      aria-label={label}
+      className="flex flex-wrap items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900"
+    >
+      <p className="min-w-48 flex-1">{prompt}</p>
+      <Button variant="outline" size="sm" onClick={() => setAsking(false)}>
+        Cancel
+      </Button>
+      <Button
+        variant="destructive"
+        size="sm"
+        disabled={disabled}
+        onClick={() => {
+          setAsking(false);
+          onConfirm();
+        }}
+      >
+        {label}
+      </Button>
+    </div>
   );
 }
 function Data({

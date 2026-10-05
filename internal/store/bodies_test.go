@@ -130,11 +130,18 @@ func TestGrowingConversationStoresEachTurnOnce(t *testing.T) {
 	if stored > int64(final)*2 {
 		t.Fatalf("stored %d bytes for a %d-byte final request", stored, final)
 	}
-	got, err := s.History(ctx, settings.ActiveCollectionID, 1)
+	listed, err := s.History(ctx, settings.ActiveCollectionID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got[0].Request, requests[len(requests)-1]) {
+	if listed[0].Request != nil || listed[0].Summary == nil || listed[0].Summary.Items != 1+4*len(requests) {
+		t.Fatalf("history list: request %d bytes, summary %+v", len(listed[0].Request), listed[0].Summary)
+	}
+	got, err := s.HistoryItem(ctx, listed[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Request, requests[len(requests)-1]) {
 		t.Fatal("history request changed in storage")
 	}
 }
