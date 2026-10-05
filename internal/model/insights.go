@@ -76,7 +76,9 @@ type InsightBucket struct {
 
 type ModelInsight struct {
 	OutcomeCounts
-	Model          string       `json:"model"`
+	Model string `json:"model"`
+	// HitRate is defined as InsightTotals.HitRate, over this model's rows.
+	HitRate        *float64     `json:"hit_rate"`
 	UpstreamTokens TokenTotals  `json:"upstream_tokens"`
 	ReplayedTokens TokenTotals  `json:"replayed_tokens"`
 	UpstreamCost   *float64     `json:"upstream_cost"`
@@ -88,6 +90,8 @@ type ModelInsight struct {
 type RouteInsight struct {
 	OutcomeCounts
 	Route string `json:"route"`
+	// HitRate is defined as InsightTotals.HitRate, over this route's rows.
+	HitRate *float64 `json:"hit_rate"`
 }
 
 type InsightTotals struct {
@@ -149,6 +153,8 @@ type ThreadTurn struct {
 	LookupOutcome string           `json:"lookup_outcome"`
 	Detail        string           `json:"detail"`
 	RecordingID   int64            `json:"recording_id"`
+	Route         string           `json:"route"`
+	Source        string           `json:"source"`
 	Items         int              `json:"items"`
 	Preview       string           `json:"preview"`
 	DurationMS    *int64           `json:"duration_ms"`
@@ -168,4 +174,8 @@ type NearestCandidate struct {
 	Preview     string  `json:"preview"`
 	Model       string  `json:"model"`
 	Items       int     `json:"items"`
+	// Thread is the recording's request thread; "" if none.
+	Thread string `json:"thread"`
+	// CreatedAt is when the recording's active revision was created.
+	CreatedAt string `json:"created_at"`
 }

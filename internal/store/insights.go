@@ -206,6 +206,28 @@ func (l *latencies) add(r *historyRow) {
 	}
 }
 
+// hitRate is hits / (hits + misses + recorded rows whose lookup missed);
+// interrupted replays and failed calls count on neither side.
+type hitRate struct{ hits, den int64 }
+
+func (h *hitRate) add(r *historyRow) {
+	switch {
+	case r.outcome == "hit":
+		h.hits++
+		h.den++
+	case r.outcome == "miss", r.outcome == "recorded" && r.lookup == "miss":
+		h.den++
+	}
+}
+
+func (h hitRate) value() *float64 {
+	if h.den == 0 {
+		return nil
+	}
+	v := float64(h.hits) / float64(h.den)
+	return &v
+}
+
 // optionalSum is a cost total that stays null until some row reports one.
 type optionalSum struct {
 	sum      float64
@@ -341,8 +363,13 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 	}
 	type modelAgg struct {
 		counts model.OutcomeCounts
+		rate   hitRate
 		tokens tokenSet
 		lat    latencies
+	}
+	type routeAgg struct {
+		model.RouteInsight
+		rate hitRate
 	}
 	type recordingAgg struct {
 		hits    int64
@@ -360,20 +387,18 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 		order = append(order, b)
 	}
 	models := map[string]*modelAgg{}
-	routes := map[string]*model.RouteInsight{}
+	routes := map[string]*routeAgg{}
 	recordings := map[int64]*recordingAgg{}
 	var totals tokenSet
 	var lat latencies
-	var recordedAfterMiss int64
+	var rate hitRate
 	threads := map[string]bool{}
 	for i := range rows {
 		r := &rows[i]
 		out.Totals.Count(r.outcome)
 		totals.add(r)
 		lat.add(r)
-		if r.outcome == "recorded" && r.lookup == "miss" {
-			recordedAfterMiss++
-		}
+		rate.add(r)
 		if t := r.thread(); t != "" {
 			threads[t] = true
 		}
@@ -388,14 +413,16 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 			models[name] = m
 		}
 		m.counts.Count(r.outcome)
+		m.rate.add(r)
 		m.tokens.add(r)
 		m.lat.add(r)
 		route := routes[r.route]
 		if route == nil {
-			route = &model.RouteInsight{Route: r.route}
+			route = &routeAgg{RouteInsight: model.RouteInsight{Route: r.route}}
 			routes[r.route] = route
 		}
 		route.Count(r.outcome)
+		route.rate.add(r)
 		if r.outcome == "hit" && r.recordingID != 0 {
 			rec := recordings[r.recordingID]
 			if rec == nil {
@@ -412,10 +439,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 			}
 		}
 	}
-	if den := out.Totals.Hits + out.Totals.Misses + recordedAfterMiss; den > 0 {
-		rate := float64(out.Totals.Hits) / float64(den)
-		out.Totals.HitRate = &rate
-	}
+	out.Totals.HitRate = rate.value()
 	out.Totals.UpstreamTokens, out.Totals.ReplayedTokens = totals.upstream, totals.replayed
 	out.Totals.UpstreamCost, out.Totals.SavedCost = totals.upstreamCost.value(), totals.savedCost.value()
 	out.Totals.Threads = int64(len(threads))
@@ -424,7 +448,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 		out.Series = append(out.Series, b.InsightBucket)
 	}
 	for name, m := range models {
-		out.Models = append(out.Models, model.ModelInsight{OutcomeCounts: m.counts, Model: name,
+		out.Models = append(out.Models, model.ModelInsight{OutcomeCounts: m.counts, Model: name, HitRate: m.rate.value(),
 			UpstreamTokens: m.tokens.upstream, ReplayedTokens: m.tokens.replayed,
 			UpstreamCost: m.tokens.upstreamCost.value(), SavedCost: m.tokens.savedCost.value(),
 			Upstream: m.lat.upstream.stats(), Replay: m.lat.replay.stats()})
@@ -433,7 +457,8 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 		return cmp.Or(cmp.Compare(b.Requests, a.Requests), cmp.Compare(a.Model, b.Model))
 	})
 	for _, r := range routes {
-		out.Routes = append(out.Routes, *r)
+		r.HitRate = r.rate.value()
+		out.Routes = append(out.Routes, r.RouteInsight)
 	}
 	slices.SortFunc(out.Routes, func(a, b model.RouteInsight) int {
 		return cmp.Or(cmp.Compare(b.Requests, a.Requests), cmp.Compare(a.Route, b.Route))
@@ -511,7 +536,7 @@ func (s *Store) Thread(ctx context.Context, cid int64, thread string) (model.Thr
 	for i := range rows {
 		r := &rows[i]
 		turn := model.ThreadTurn{HistoryID: r.id, CreatedAt: r.createdAt, Outcome: r.outcome, LookupOutcome: r.lookup, Detail: r.detail,
-			RecordingID: r.recordingID, DurationMS: r.duration, FirstEventMS: r.first, Response: r.resp}
+			RecordingID: r.recordingID, Route: r.route, Source: r.source, DurationMS: r.duration, FirstEventMS: r.first, Response: r.resp}
 		if r.req != nil {
 			turn.Items, turn.Preview = r.req.Items, r.req.Preview
 		}
@@ -650,7 +675,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		body, size int64
 		route      string
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size FROM recordings r
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size,v.created_at FROM recordings r
  JOIN revisions v ON v.id=r.active_revision_id JOIN bodies b ON b.id=v.request_body WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
 		return nil, err
@@ -661,7 +686,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		var c candidate
 		var recKey string
 		var recManifest []byte
-		if err = rows.Scan(&c.RecordingID, &recKey, &c.route, &c.body, &recManifest, &c.size); err != nil {
+		if err = rows.Scan(&c.RecordingID, &recKey, &c.route, &c.body, &recManifest, &c.size, &c.CreatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -725,7 +750,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	for _, c := range all {
 		v := sums[c.body]
 		if v != nil {
-			c.Preview, c.Model, c.Items = v.Preview, v.Model, v.Items
+			c.Preview, c.Model, c.Items, c.Thread = v.Preview, v.Model, v.Items, v.Thread
 		}
 		switch {
 		case own.Thread != "" && v != nil && v.Thread == own.Thread:

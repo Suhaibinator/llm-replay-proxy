@@ -126,6 +126,8 @@ export type Diff = {
   recorded_exists: boolean;
   request_display: string;
   recorded_display: string;
+  /** The path is under one of the collection's match exclusions, so it did not affect matching. */
+  excluded: boolean;
 };
 export const defaults: Settings = {
   mode: "replay",
@@ -278,6 +280,8 @@ export type InsightBucket = OutcomeCounts & {
 
 export type ModelInsight = OutcomeCounts & {
   model: string;
+  /** Same definition as totals.hit_rate, over this model's rows. */
+  hit_rate: number | null;
   upstream_tokens: TokenTotals;
   replayed_tokens: TokenTotals;
   upstream_cost: number | null;
@@ -301,7 +305,8 @@ export type Insights = {
   };
   series: InsightBucket[];
   models: ModelInsight[];
-  routes: (OutcomeCounts & { route: string })[];
+  /** hit_rate: same definition as totals.hit_rate, over the route's rows. */
+  routes: (OutcomeCounts & { route: string; hit_rate: number | null })[];
   latency: { upstream: LatencyStats; replay: LatencyStats };
   top_recordings: {
     recording_id: number;
@@ -337,6 +342,9 @@ export type ThreadTurn = {
   lookup_outcome: string;
   detail: string;
   recording_id: number;
+  /** The history row's route and source. */
+  route: string;
+  source: string;
   items: number;
   preview: string;
   duration_ms: number | null;
@@ -355,6 +363,10 @@ export type NearestCandidate = {
   preview: string;
   model: string;
   items: number;
+  /** The recording's request thread fingerprint; "" if none. */
+  thread: string;
+  /** When the recording's active revision was created. */
+  created_at: string;
 };
 
 /** Recording list rows also carry the active response's summary. */

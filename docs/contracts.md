@@ -90,8 +90,11 @@ and matching provenance remain immutable.
 For exact numeric inspection, use the string fields rather than parsing and
 serializing JSON through a floating-point representation. Comparison differences
 include exact `request_display`/`recorded_display` strings and existence flags to
-distinguish missing values from null. History-based comparison also reports a
-route mismatch.
+distinguish missing values from null, and `excluded`, true when the path is (or
+is inside) one of the collection's match exclusions, so the difference did not
+affect matching. Paths and exclusions are compared as written; an excluded
+array element shifts later indices in the matching input, which `excluded`
+does not model. History-based comparison also reports a route mismatch.
 
 `Event.data` contains a complete raw SSE frame, including event/data lines and its
 blank delimiter. `Event.offset_ms` is the relative capture time. Edits must retain

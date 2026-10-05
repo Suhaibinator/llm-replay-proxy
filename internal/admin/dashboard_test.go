@@ -90,8 +90,11 @@ func TestDashboardEndpoints(t *testing.T) {
 		t.Fatalf("thread detail: %d %s", w.Code, w.Body.String())
 	}
 	turn := decodeAs[map[string]any](t, w.Body.Bytes())["turns"].([]any)[0].(map[string]any)
-	if got := keys(turn); got != "created_at,detail,duration_ms,first_event_ms,history_id,items,lookup_outcome,outcome,preview,recording_id,response" {
+	if got := keys(turn); got != "created_at,detail,duration_ms,first_event_ms,history_id,items,lookup_outcome,outcome,preview,recording_id,response,route,source" {
 		t.Fatalf("turn keys %s", got)
+	}
+	if turn["route"] != "/v1/chat/completions" || turn["source"] != "upstream" {
+		t.Fatalf("turn route/source %v", turn)
 	}
 	if got := keys(turn["response"].(map[string]any)); got != "cost,model,outcome,output_chars,reasoning_chars,tool_calls,usage" {
 		t.Fatalf("response keys %s", got)
@@ -105,8 +108,11 @@ func TestDashboardEndpoints(t *testing.T) {
 	if w.Code != 200 || len(nearest.Candidates) != 1 || nearest.Candidates[0]["reason"] != "same_thread" || nearest.Candidates[0]["recording_id"] != float64(e.Recording.ID) {
 		t.Fatalf("nearest: %d %s", w.Code, w.Body.String())
 	}
-	if got := keys(nearest.Candidates[0]); got != "items,model,preview,reason,recording_id,similarity" {
+	if got := keys(nearest.Candidates[0]); got != "created_at,items,model,preview,reason,recording_id,similarity,thread" {
 		t.Fatalf("candidate keys %s", got)
+	}
+	if c := nearest.Candidates[0]; c["thread"] != thread || c["created_at"] != e.Revision.CreatedAt {
+		t.Fatalf("candidate thread/created_at %v (want %s %s)", c, thread, e.Revision.CreatedAt)
 	}
 	if w = request(t, h, http.MethodHead, "/api/history/"+itoa(missID)+"/nearest", nil); w.Code != 200 {
 		t.Fatalf("HEAD nearest: %d", w.Code)

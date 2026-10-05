@@ -276,6 +276,18 @@ func unicodeEscape(body []byte, u int) (uint64, int, error) {
 	return code, u + 4, nil
 }
 
+// Excluded reports whether the JSON Pointer path names a value that one of the
+// exclusions removes before matching: the excluded value itself or anything
+// inside it. Paths and exclusions use the same RFC 6901 escaping.
+func Excluded(path string, exclusions []string) bool {
+	for _, pointer := range exclusions {
+		if path == pointer || strings.HasPrefix(path, pointer+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func parsePointer(pointer string) []string {
 	parts := strings.Split(pointer[1:], "/")
 	for i := range parts {

@@ -70,7 +70,8 @@ attributed model). 404 for an unknown collection.
 - Outcomes: `hits` = outcome `hit`; `misses` = `miss`; `recorded`;
   `interrupted`; `errors` = `error` + `incomplete`; `requests` = all rows.
   `hit_rate` = hits / (hits + misses + recorded rows whose lookup missed), null
-  when the denominator is 0.
+  when the denominator is 0. Each `models` and `routes` row has its own
+  `hit_rate` with the same definition over its rows.
 - `upstream_tokens` / `upstream_cost`: summed over `recorded` rows' revisions.
   `replayed_tokens` / `saved_cost`: summed over `hit` rows' revisions (what
   replay avoided paying for). Token fields sum only reported counts (0 when
@@ -106,7 +107,8 @@ and restrict the rows counted. `opening` comes from the earliest row; `latest`,
 
 `ThreadDetail`; `turns` oldest first, each with the response summary of the
 revision it was served (`null` for misses, errors and interrupted rows). The
-summary part covers every row of the thread (no range). `{thread}` must be 16
+summary part covers every row of the thread (no range). Each turn also carries
+the history row's `route` and `source`. `{thread}` must be 16
 lowercase hex digits (else 404 `not_found`); 404 if no row in the collection
 has that thread.
 
@@ -117,8 +119,10 @@ in the row's collection (excluding an exact key match). Recordings whose active
 request has the same `thread` come first (`same_thread`), then others ranked by
 `similarity`: the share of the history request's chunk bytes that also appear
 in the recording's active request body (`shared_content`). Candidates below
-0.2 similarity are omitted unless same-thread. 404 for an unknown history id;
-a row without a request returns no candidates.
+0.2 similarity are omitted unless same-thread. Each candidate carries `thread`
+(its request's thread fingerprint, `""` if none) and `created_at` (when its
+active revision was created). 404 for an unknown history id; a row without a
+request returns no candidates.
 
 Similarity uses the stored content-defined chunks (~8 KiB average), so large
 requests are compared without reading them. A request of at most 16 KiB is a
@@ -126,7 +130,8 @@ single stored chunk or two, which would make similarity all-or-nothing; it is
 also compared with fine (~64-byte) content-defined chunks against recordings
 of the same route and model (up to 300 per call), keeping the higher share.
 The UI then calls `POST /api/compare {recording_id, history_id}` for the field
-diff.
+diff; each difference's `excluded` says whether its path is under one of the
+collection's match exclusions (see `contracts.md`).
 
 ## `GET /api/recordings?collection_id=N`
 

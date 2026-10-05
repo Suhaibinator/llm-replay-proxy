@@ -138,7 +138,13 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if names["claude-x"].UpstreamCost != nil || names["claude-x"].SavedCost != nil || !floatIs(names["gpt-a-2025"].SavedCost, 0.03) {
 		t.Fatalf("model costs %+v", names["claude-x"])
 	}
-	if len(in.Routes) != 1 || in.Routes[0].Route != chatRoute || in.Routes[0].Requests != 13 {
+	// Per-model hit rates: 4/(4+1 recorded after a miss); 2/2 (recorded in
+	// bypass does not count); 0/1 (one miss; error, incomplete, interrupted
+	// do not count); 0/1.
+	if !floatIs(names["gpt-a-2025"].HitRate, 0.8) || !floatIs(names["claude-x"].HitRate, 1) || !floatIs(names["gpt-a"].HitRate, 0) || !floatIs(names["unknown"].HitRate, 0) {
+		t.Fatalf("model hit rates %v %v %v %v", names["gpt-a-2025"].HitRate, names["claude-x"].HitRate, names["gpt-a"].HitRate, names["unknown"].HitRate)
+	}
+	if len(in.Routes) != 1 || in.Routes[0].Route != chatRoute || in.Routes[0].Requests != 13 || !floatIs(in.Routes[0].HitRate, 6.0/9) {
 		t.Fatalf("routes %+v", in.Routes)
 	}
 	// Replay durations 5, 20, 70, 50, 100000, 2 (one hit has none).

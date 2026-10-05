@@ -657,6 +657,18 @@ type difference struct {
 	RecordedExists  bool   `json:"recorded_exists"`
 	RequestDisplay  string `json:"request_display"`
 	RecordedDisplay string `json:"recorded_display"`
+	// Excluded marks a path under one of the collection's match exclusions:
+	// the difference did not affect matching.
+	Excluded bool `json:"excluded"`
+}
+
+// markExcluded flags the differences that the collection's exclusions hide
+// from matching.
+func markExcluded(d []difference, exclusions []string) []difference {
+	for i := range d {
+		d[i].Excluded = match.Excluded(d[i].Path, exclusions)
+	}
+	return d
 }
 
 func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +693,11 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	collection, err := h.db.Collection(r.Context(), e.Recording.CollectionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	if in.HistoryID != 0 {
 		history, historyErr := h.db.HistoryItem(r.Context(), in.HistoryID)
 		if historyErr != nil {
@@ -700,7 +717,7 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			diffJSON("", a, b, &d)
-			writeJSON(w, 200, map[string]any{"differences": d})
+			writeJSON(w, 200, map[string]any{"differences": markExcluded(d, collection.Exclusions)})
 			return
 		}
 	}
@@ -715,7 +732,7 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 	}
 	d := make([]difference, 0)
 	diffJSON("", a, b, &d)
-	writeJSON(w, 200, map[string]any{"differences": d})
+	writeJSON(w, 200, map[string]any{"differences": markExcluded(d, collection.Exclusions)})
 }
 
 func diffJSON(path string, a, b any, out *[]difference) {
