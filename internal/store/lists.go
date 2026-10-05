@@ -3,13 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"log"
 	"time"
 
 	"github.com/local/llm-replay-proxy/internal/model"
-	"github.com/local/llm-replay-proxy/internal/protocol"
 )
 
 // DefaultHistoryLimit is the history rows kept per collection on a new database.
@@ -20,47 +18,6 @@ const MaxHistoryLimit = 100_000_000
 
 // ErrActiveCollection rejects deleting the collection traffic is using.
 var ErrActiveCollection = errors.New("store: collection is active")
-
-// summaryVersion changes whenever protocol.SummarizeRequest does, so stored
-// summaries made by an older build are recomputed.
-const summaryVersion = 1
-
-type storedSummary struct {
-	Version int `json:"v"`
-	model.RequestSummary
-}
-
-// summaries returns the summary of each body in need (body id to the route it
-// was sent to). A summary is computed the first time a list needs it and saved
-// with the body, keeping the write path free of request parsing.
-func (s *Store) summaries(ctx context.Context, need map[int64]string) (map[int64]*model.RequestSummary, error) {
-	out := make(map[int64]*model.RequestSummary, len(need))
-	for id, route := range need {
-		var raw sql.NullString
-		if err := s.db.QueryRowContext(ctx, "SELECT summary FROM bodies WHERE id=?", id).Scan(&raw); err != nil {
-			return nil, err
-		}
-		var stored storedSummary
-		if raw.Valid && json.Unmarshal([]byte(raw.String), &stored) == nil && stored.Version == summaryVersion {
-			out[id] = &stored.RequestSummary
-			continue
-		}
-		body, err := loadBody(ctx, s.db, id)
-		if err != nil {
-			return nil, err
-		}
-		stored = storedSummary{Version: summaryVersion, RequestSummary: protocol.SummarizeRequest(route, body)}
-		encoded, err := json.Marshal(stored)
-		if err != nil {
-			return nil, err
-		}
-		if _, err = s.db.ExecContext(ctx, "UPDATE bodies SET summary=? WHERE id=?", string(encoded), id); err != nil {
-			return nil, err
-		}
-		out[id] = &stored.RequestSummary
-	}
-	return out, nil
-}
 
 // Recordings lists a collection, newest first, with each active request
 // summarized and replay hits counted from history. No request bytes are read
@@ -95,13 +52,24 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 			need[body.Int64] = out[i].Route
 		}
 	}
-	sums, err := s.summaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, need)
+	if err != nil {
+		return nil, err
+	}
+	revisions := make(map[int64]bool, len(out))
+	for i := range out {
+		if out[i].ActiveRevisionID != 0 {
+			revisions[out[i].ActiveRevisionID] = true
+		}
+	}
+	responses, err := s.responseSummaries(ctx, revisions)
 	if err != nil {
 		return nil, err
 	}
 	index := make(map[int64]int, len(out))
 	for i := range out {
 		out[i].Summary = sums[bodies[i].Int64]
+		out[i].Response = responses[out[i].ActiveRevisionID]
 		index[out[i].ID] = i
 	}
 	rows, err = s.db.QueryContext(ctx, "SELECT recording_id,count(*),max(created_at) FROM history WHERE collection_id=? AND outcome='hit' AND recording_id<>0 GROUP BY recording_id", cid)
@@ -167,7 +135,7 @@ func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int)
 			need[body.Int64] = out[i].Route
 		}
 	}
-	sums, err := s.summaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, need)
 	if err != nil {
 		return nil, err
 	}
@@ -191,13 +159,13 @@ func (s *Store) HistoryItem(ctx context.Context, id int64) (model.History, error
 	if h.Request, err = (bodyCache{}).load(ctx, s.db, body); err != nil || !body.Valid {
 		return h, err
 	}
-	sums, err := s.summaries(ctx, map[int64]string{body.Int64: h.Route})
+	sums, err := s.requestSummaries(ctx, map[int64]string{body.Int64: h.Route})
 	h.Summary = sums[body.Int64]
 	return h, err
 }
 
 // DeleteRecording removes a recording and every revision of it. History rows
-// that replayed it stay, unlinked.
+// that replayed it stay, unlinked from the recording and its revisions.
 func (s *Store) DeleteRecording(ctx context.Context, id int64) error {
 	return s.deleting(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, "DELETE FROM recordings WHERE id=?", id)
@@ -207,7 +175,7 @@ func (s *Store) DeleteRecording(ctx context.Context, id int64) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE history SET recording_id=0 WHERE recording_id=?", id)
+		_, err = tx.ExecContext(ctx, "UPDATE history SET recording_id=0,revision_id=NULL WHERE recording_id=?", id)
 		return err
 	})
 }
