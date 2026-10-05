@@ -207,7 +207,12 @@ export const shortKey = (s: string) =>
 // Dashboard insight endpoints. The contract is docs/dashboard-api.md; the Go
 // handlers and these types must agree field for field.
 
-/** Token counts as the provider reported them; null when not reported. */
+/**
+ * Token counts as the provider reported them; null when not reported.
+ * Subsets nest for every protocol: cached_input is part of input and
+ * reasoning is part of output. Messages input counts input_tokens plus cache
+ * writes and cache reads; Messages reports no reasoning or total (null).
+ */
 export type TokenUsage = {
   input: number | null;
   cached_input: number | null;
@@ -247,11 +252,20 @@ export type OutcomeCounts = {
   errors: number;
 };
 
+/**
+ * Per-bucket (not cumulative) counts: samples with previous le < value <= le
+ * (ms). Bounds are 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000;
+ * the last bucket has le null and counts everything above 60000.
+ */
+export type Histogram = { le: number | null; count: number }[];
+
 export type LatencyStats = {
   duration_ms: Percentiles;
   first_event_ms: Percentiles;
-  /** Duration histogram: count of samples with duration <= le (ms); last le is null for "more". */
-  histogram: { le: number | null; count: number }[];
+  /** Duration histogram. */
+  histogram: Histogram;
+  /** First-event histogram (streams only), same buckets. */
+  first_event_histogram: Histogram;
 };
 
 export type InsightBucket = OutcomeCounts & {
