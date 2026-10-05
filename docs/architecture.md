@@ -11,7 +11,18 @@ The executable wires three inference routes, `/api/` control routes, `/healthz`,
 - `internal/admin` implements inspection, comparison, editing, settings, and import/export.
 - `web` contains Next.js source, shadcn components, Tailwind v4 styles, the generated `out` assets, and the Go embed handler.
 
-A recording identifies a collection and matching key. Its active revision points to immutable response content. A completed refresh inserts a revision and changes the active pointer in one transaction. Failed refreshes never update that pointer. Revision provenance retains the request and matching input used for the revision. Network forwarding and event delays happen outside database transactions.
+A recording identifies a collection and matching key. Its active revision points to immutable response content. A completed refresh inserts a revision and changes the active pointer in one transaction. Failed refreshes never update that pointer. Revision provenance retains the exact request used for the revision; its matching input is recomputed when displayed. Network forwarding and event delays happen outside database transactions.
+
+### Storage
+
+Requests dominate storage: a Responses client with `store: false` re-sends the whole thread, including images and encrypted reasoning, on every turn, and every call is also logged to history. Request bodies are therefore content-addressed. `bodies` holds one row per distinct body (its SHA-256, size, and a list of chunk ids), and `chunks` holds each distinct content-defined chunk once (2–64 KiB, ~8 KiB average, boundaries from a gear rolling hash), zstd-compressed when that saves at least an eighth. Revisions and history rows reference a body.
+
+- Writing a body seen before (every replay hit of a recorded request) is one hash and one indexed lookup. A new turn stores only the chunks around the appended items, so a conversation's storage grows with its length, not with the square of it.
+- Reads reassemble a body from its chunks and verify it against the stored size and hash. The replay lookup never reads the request at all.
+- Every SSE frame is kept, with its offset, because replay pacing, validation, text editing, and provider-state lookups work per frame. A revision's frames are stored as one zstd-compressed JSON array.
+- Writes keep no reference counts. Export, the only path that deletes rows a snapshot must not carry, sweeps unreferenced bodies and chunks before compacting the file.
+
+The format version is SQLite's `user_version`. A database or snapshot in another format is refused, not migrated.
 
 The replay clock is injectable. The first frame uses the configured first-event delay; subsequent frames use the difference between their captured offsets, multiplied by the configured factor. Zero delays produce immediate playback, with cancellation checked between events.
 
