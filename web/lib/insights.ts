@@ -210,6 +210,7 @@ const zeroTokens = (): TokenTotals => ({
 });
 const emptyBucket = (start: string): InsightBucket => ({
   start,
+  hit_rate: null,
   requests: 0,
   hits: 0,
   misses: 0,
@@ -307,14 +308,12 @@ export const OUTCOMES: {
 ];
 
 /**
- * Cache hit rate for a slice: the server's value when it sends one, else
- * hits / (hits + misses + recorded). Recorded rows count as lookups that
- * missed, which matches the server whenever the proxy runs in auto mode.
+ * Cache hit rate for a slice, always the server's: it counts recording
+ * lookups, which outcome counts alone cannot reproduce (an interrupted replay
+ * still hit; Record mode never looks up).
  */
-export function hitRate(c: OutcomeCounts & { hit_rate?: number | null }) {
-  if (c.hit_rate !== undefined) return c.hit_rate;
-  const d = c.hits + c.misses + c.recorded;
-  return d > 0 ? c.hits / d : null;
+export function hitRate(c: { hit_rate: number | null }) {
+  return c.hit_rate;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +566,7 @@ export function modelRows(models: ModelInsight[]): ModelRow[] {
       share: total ? m.requests / total : 0,
       hits: m.hits,
       errors: m.errors,
-      hitRate: hitRate(m as ModelInsight & { hit_rate?: number | null }),
+      hitRate: hitRate(m),
       upstreamTokens,
       replayedTokens,
       tokens: upstreamTokens + replayedTokens,
@@ -695,8 +694,8 @@ export function headline(ins: Insights, series = ins.series): Headline {
   return {
     requests: t.requests,
     hitRate: t.hit_rate,
-    hits: t.hits,
-    lookups: t.hits + t.misses + t.recorded,
+    hits: t.lookup_hits,
+    lookups: t.lookups,
     replayedTokens: tokenTotal(t.replayed_tokens),
     upstreamTokens: tokenTotal(t.upstream_tokens),
     savedCost: t.saved_cost,

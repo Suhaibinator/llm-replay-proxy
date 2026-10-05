@@ -70,6 +70,7 @@ type LatencyStats struct {
 type InsightBucket struct {
 	OutcomeCounts
 	Start          string      `json:"start"`
+	HitRate        *float64    `json:"hit_rate"`
 	UpstreamTokens TokenTotals `json:"upstream_tokens"`
 	ReplayedTokens TokenTotals `json:"replayed_tokens"`
 }
@@ -96,7 +97,11 @@ type RouteInsight struct {
 
 type InsightTotals struct {
 	OutcomeCounts
+	// HitRate is LookupHits / Lookups: calls whose recording lookup found a
+	// recording, over all calls that looked one up (Record mode does not).
 	HitRate        *float64    `json:"hit_rate"`
+	Lookups        int64       `json:"lookups"`
+	LookupHits     int64       `json:"lookup_hits"`
 	UpstreamTokens TokenTotals `json:"upstream_tokens"`
 	ReplayedTokens TokenTotals `json:"replayed_tokens"`
 	UpstreamCost   *float64    `json:"upstream_cost"`

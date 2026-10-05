@@ -36,7 +36,7 @@ issues, refreshes, lists, or revokes tokens.
 | `/api/history?collection_id=N` | GET, DELETE | GET: newest calls with a request summary (`request`, null without a body); optional `limit` up to 1000 and `after_id` for rows newer than an id. DELETE: 204; clears the collection's history |
 | `/api/history/N` | GET | One call with its exact `request_text` |
 | `/api/history/N/nearest` | GET | `{candidates}`: up to 5 recordings the call most likely meant (same thread first, then shared request bytes); see [dashboard API](dashboard-api.md) |
-| `/api/analytics?collection_id=N&from=RFC3339&to=RFC3339` | GET | Complete history aggregates, UTC series, hit rate, and source-specific timing percentiles |
+| `/api/analytics?collection_id=N&from=RFC3339&to=RFC3339` | GET | Complete history aggregates, UTC series, hit rate (the lookup-based rate `/api/insights` also reports), and source-specific timing percentiles |
 | `/api/insights?collection_id=N&from=RFC3339&to=RFC3339[&model=M]` | GET | Dashboard aggregates: outcomes, tokens and costs by time, model and route, latency histograms, top recordings and threads; see [dashboard API](dashboard-api.md) |
 | `/api/threads?collection_id=N[&limit=50][&from=…&to=…]` | GET | Conversation threads, most recently active first |
 | `/api/threads/{thread}?collection_id=N` | GET | One thread with its turns, oldest first; `{thread}` is 16 lowercase hex digits |

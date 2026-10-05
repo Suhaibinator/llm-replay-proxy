@@ -69,7 +69,7 @@ export function RequestViewer({ route, raw }: { route: string; raw: string }) {
               <p
                 key={warning}
                 role="status"
-                className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+                className="rounded-md border border-warn/30 bg-warn/10 p-3 text-sm text-warn"
               >
                 {warning}
               </p>

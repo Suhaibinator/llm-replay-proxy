@@ -69,9 +69,14 @@ attributed model). 404 for an unknown collection.
 
 - Outcomes: `hits` = outcome `hit`; `misses` = `miss`; `recorded`;
   `interrupted`; `errors` = `error` + `incomplete`; `requests` = all rows.
-  `hit_rate` = hits / (hits + misses + recorded rows whose lookup missed), null
-  when the denominator is 0. Each `models` and `routes` row has its own
-  `hit_rate` with the same definition over its rows.
+  `hit_rate` = `lookup_hits` / `lookups`: calls whose recording lookup found a
+  recording, over every call that looked one up (`lookup_outcome` `hit` or
+  `miss`), whatever happened after the lookup. An interrupted replay still
+  hit; an Auto-mode miss whose upstream call failed still missed; Record mode
+  (`bypass`) is no lookup. Null when there were no lookups. This is the same
+  rate `/api/analytics` reports. Each `series` bucket and each `models` and
+  `routes` row has its own `hit_rate` with the same definition over its rows,
+  so the outcome counts alone do not reproduce it.
 - `upstream_tokens` / `upstream_cost`: summed over `recorded` rows' revisions.
   `replayed_tokens` / `saved_cost`: summed over `hit` rows' revisions (what
   replay avoided paying for). Token fields sum only reported counts (0 when
@@ -146,8 +151,10 @@ revision's `ResponseSummary` (null if it cannot be derived).
 conversations that grow over up to ten turns with tool calls, and hits,
 misses (including near-miss variants of recorded requests for the nearest
 view), recordings, edits, interruptions and errors over the last 30 days, with
-usage and latencies. Every recording passes the same validation as live
-traffic. Each run adds a new collection ("Demo traffic", "Demo traffic 2", …)
+usage and latencies. Recordings and edits carry the time of the call that
+recorded or edited them (`Store.PublishAt`), so their dates spread over the
+range like the history does. Every recording passes the same validation as
+live traffic. Each run adds a new collection ("Demo traffic", "Demo traffic 2", …)
 and makes it active.
 
 ```sh

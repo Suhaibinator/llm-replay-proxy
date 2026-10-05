@@ -506,6 +506,8 @@ async function mockAPI(page) {
         totals: {
           ...zeroCounts,
           hit_rate: null,
+          lookups: 0,
+          lookup_hits: 0,
           upstream_tokens: emptyTotals,
           replayed_tokens: emptyTotals,
           upstream_cost: null,

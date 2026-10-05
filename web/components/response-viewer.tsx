@@ -209,7 +209,7 @@ export function ResponseViewer({
               <p
                 key={warning}
                 role="status"
-                className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+                className="rounded-md border border-warn/30 bg-warn/10 p-3 text-sm text-warn"
               >
                 {warning}
               </p>
@@ -310,9 +310,7 @@ export function ResponseViewer({
                     >
                       <div className="space-y-2 pb-1 pl-5">
                         {frame.error && (
-                          <p className="text-xs text-amber-800">
-                            {frame.error}
-                          </p>
+                          <p className="text-xs text-warn">{frame.error}</p>
                         )}
                         {frame.value !== undefined && (
                           <JsonTree value={frame.value} label="Event fields" />

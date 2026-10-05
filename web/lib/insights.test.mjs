@@ -55,6 +55,7 @@ const counts = (o = {}) => ({
 const model = (name, o = {}) => ({
   ...counts(o),
   model: name,
+  hit_rate: null,
   upstream_tokens: tokens(0, 0, 0, 0),
   replayed_tokens: tokens(0, 0, 0, 0),
   upstream_cost: null,
@@ -224,11 +225,13 @@ test("token parts split cached input and reasoning out of their parents", () => 
   assert.equal(rows[0].replayedTotal, 120);
 });
 
-test("hit rate prefers the server's value and falls back to lookups", () => {
-  assert.equal(hitRate(counts({ hits: 3, misses: 1 })), 0.75);
-  assert.equal(hitRate(counts({ hits: 1, recorded: 3 })), 0.25);
-  assert.equal(hitRate(counts()), null);
-  assert.equal(hitRate({ ...counts({ hits: 1 }), hit_rate: 0.5 }), 0.5);
+test("hit rate is always the server's lookup-based value", () => {
+  // Outcome counts would say 1/4; the server's lookups say otherwise.
+  assert.equal(
+    hitRate({ ...counts({ hits: 1, recorded: 3 }), hit_rate: 0.5 }),
+    0.5,
+  );
+  assert.equal(hitRate({ ...counts({ hits: 3 }), hit_rate: null }), null);
 });
 
 test("histograms merge on shared bounds with labels and shares", () => {
@@ -289,6 +292,7 @@ test("model rows derive mix, shares, latency and sort with nulls last", () => {
       hits: 20,
       misses: 2,
       recorded: 8,
+      hit_rate: 20 / 30,
       upstream_tokens: tokens(1000, 200, 800, 600),
       replayed_tokens: tokens(4000, 1000, 2000, 1500),
       upstream_cost: 0.5,
@@ -300,6 +304,7 @@ test("model rows derive mix, shares, latency and sort with nulls last", () => {
       requests: 10,
       hits: 9,
       misses: 1,
+      hit_rate: 0.9,
       upstream_tokens: tokens(500, 0, 100, 0),
     }),
     model("", { requests: 0 }),
@@ -356,8 +361,12 @@ test("model options remember models seen while filtered", () => {
 
 test("routes sort busiest first with shares", () => {
   const rows = routeRows([
-    { ...counts({ requests: 1, hits: 1 }), route: "/v1/messages" },
-    { ...counts({ requests: 3, misses: 3 }), route: "/v1/responses" },
+    { ...counts({ requests: 1, hits: 1 }), route: "/v1/messages", hit_rate: 1 },
+    {
+      ...counts({ requests: 3, misses: 3 }),
+      route: "/v1/responses",
+      hit_rate: 0,
+    },
   ]);
   assert.deepEqual(
     rows.map((r) => [r.route, r.share, r.hitRate]),
@@ -385,12 +394,14 @@ test("headline totals and per-bucket trends", () => {
     {
       ...counts({ requests: 4, hits: 3, misses: 1 }),
       start: "a",
+      hit_rate: 0.75,
       upstream_tokens: tokens(10, 0, 10, 0),
       replayed_tokens: tokens(100, 0, 50, 0),
     },
     {
       ...counts(),
       start: "b",
+      hit_rate: null,
       upstream_tokens: tokens(0, 0, 0, 0),
       replayed_tokens: tokens(0, 0, 0, 0),
     },
@@ -402,6 +413,8 @@ test("headline totals and per-bucket trends", () => {
     totals: {
       ...counts({ requests: 4, hits: 3, misses: 1 }),
       hit_rate: 0.75,
+      lookups: 4,
+      lookup_hits: 3,
       upstream_tokens: tokens(10, 0, 10, 0),
       replayed_tokens: tokens(100, 0, 50, 0),
       upstream_cost: null,
@@ -420,6 +433,7 @@ test("headline totals and per-bucket trends", () => {
   });
   assert.equal(h.hitRate, 0.75);
   assert.equal(h.lookups, 4);
+  assert.equal(h.hits, 3);
   assert.equal(h.replayedTokens, 150);
   assert.equal(h.upstreamTokens, 20);
   assert.equal(h.savedCost, 0.25);

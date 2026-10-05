@@ -62,6 +62,45 @@ func TestSeedProducesValidVariedTraffic(t *testing.T) {
 	if len(kinds) != 6 {
 		t.Fatalf("protocol/transport mix %v", kinds)
 	}
+	// Recordings date from the call that recorded them: spread over the
+	// range, never after their active revision, never after a replay of them.
+	parse := func(v string) time.Time {
+		at, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			t.Fatalf("timestamp %q: %v", v, err)
+		}
+		return at
+	}
+	created := map[int64]time.Time{}
+	oldest, newest := now, now.AddDate(0, 0, -31)
+	for _, r := range recordings {
+		at := parse(r.CreatedAt)
+		if at.Before(now.AddDate(0, 0, -31)) || at.After(now) {
+			t.Fatalf("recording %d created %s, outside the seeded range", r.ID, r.CreatedAt)
+		}
+		if parse(r.UpdatedAt).Before(at) {
+			t.Fatalf("recording %d active revision %s predates the recording %s", r.ID, r.UpdatedAt, r.CreatedAt)
+		}
+		created[r.ID] = at
+		if at.Before(oldest) {
+			oldest = at
+		}
+		if at.After(newest) {
+			newest = at
+		}
+	}
+	if newest.Sub(oldest) < 20*24*time.Hour {
+		t.Fatalf("recordings span only %s to %s", oldest, newest)
+	}
+	rows, err := db.History(ctx, res.Collection.ID, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range rows {
+		if at, ok := created[h.RecordingID]; ok && parse(h.CreatedAt).Before(at) {
+			t.Fatalf("history %d (%s) uses recording %d before it was recorded (%s)", h.ID, h.CreatedAt, h.RecordingID, at)
+		}
+	}
 	threads, err := db.Threads(ctx, res.Collection.ID, 500, time.Time{}, time.Time{})
 	if err != nil || len(threads) == 0 {
 		t.Fatalf("threads %d %v", len(threads), err)

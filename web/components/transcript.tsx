@@ -396,7 +396,7 @@ export function PartView({ part }: { part: Part }) {
       return <Prose text={part.text} />;
     case "refusal":
       return (
-        <div className="flex gap-2 text-sm text-red-800">
+        <div className="flex gap-2 text-sm text-destructive">
           <Ban className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <div className="min-w-0">
             <p className="font-medium">Refused</p>
@@ -464,7 +464,7 @@ export function PartView({ part }: { part: Part }) {
         <div className="min-w-0 rounded-md border bg-card">
           <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-3 py-1.5">
             <Wrench
-              className="size-3.5 shrink-0 text-amber-700"
+              className="size-3.5 shrink-0 text-warn"
               aria-hidden="true"
             />
             <code className="min-w-0 break-all font-mono text-[13px] font-medium">
@@ -487,18 +487,20 @@ export function PartView({ part }: { part: Part }) {
         <div
           className={cn(
             "min-w-0 rounded-md border bg-card",
-            part.isError && "border-red-200",
+            part.isError && "border-destructive/30",
           )}
         >
           <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-3 py-1.5 text-sm">
             <CornerDownRight
               className={cn(
                 "size-3.5 shrink-0",
-                part.isError ? "text-red-700" : "text-amber-700",
+                part.isError ? "text-destructive" : "text-warn",
               )}
               aria-hidden="true"
             />
-            <span className={cn("font-medium", part.isError && "text-red-800")}>
+            <span
+              className={cn("font-medium", part.isError && "text-destructive")}
+            >
               {part.isError ? "Error from" : "Result of"}
             </span>
             <code className="min-w-0 break-all font-mono text-[13px]">
@@ -532,7 +534,7 @@ const roles: Record<Role, { label: string; dot: string }> = {
   developer: { label: "Developer", dot: "bg-muted-foreground" },
   user: { label: "User", dot: "bg-primary" },
   assistant: { label: "Assistant", dot: "bg-foreground" },
-  tool: { label: "Tool", dot: "bg-amber-600" },
+  tool: { label: "Tool", dot: "bg-warn" },
 };
 
 function preview(parts: Part[]): string {

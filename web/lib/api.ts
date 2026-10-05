@@ -272,6 +272,8 @@ export type LatencyStats = {
 
 export type InsightBucket = OutcomeCounts & {
   start: string;
+  /** Same definition as totals.hit_rate, over this bucket's rows. */
+  hit_rate: number | null;
   /** Tokens of responses fetched from upstream in this bucket. */
   upstream_tokens: TokenTotals;
   /** Tokens of recorded responses replayed in this bucket (work the cache saved). */
@@ -295,7 +297,14 @@ export type Insights = {
   to: string;
   bucket: "hour" | "day";
   totals: OutcomeCounts & {
+    /**
+     * lookup_hits / lookups: calls whose recording lookup found a recording,
+     * over all calls that looked one up (Record mode does not), whatever
+     * happened after the lookup. The same rate as /api/analytics.
+     */
     hit_rate: number | null;
+    lookups: number;
+    lookup_hits: number;
     upstream_tokens: TokenTotals;
     replayed_tokens: TokenTotals;
     upstream_cost: number | null;

@@ -397,7 +397,8 @@ func (s *seeder) record(ctx context.Context, p profile, streaming bool, identity
 		firstMS = *first
 	}
 	rec := model.Recording{CollectionID: s.cid, Key: key, Route: p.route, Request: req, UpstreamIdentity: identity, Streaming: streaming}
-	entry, err := s.db.Publish(ctx, rec, revision(p.route, streaming, r, firstMS, duration))
+	// Recordings date from the call that recorded them, not from seeding.
+	entry, err := s.db.PublishAt(ctx, rec, revision(p.route, streaming, r, firstMS, duration), at)
 	if err != nil {
 		return fmt.Errorf("publish %s %s: %w", p.route, p.model, err)
 	}
@@ -416,12 +417,15 @@ func (s *seeder) record(ctx context.Context, p profile, streaming bool, identity
 		}
 		rev := revision(p.route, streaming, edited, firstMS, duration)
 		rev.Source = "edit"
-		e, err := s.db.Publish(ctx, rec, rev)
+		editAt = at.Add(time.Duration(s.r.IntN(72)) * time.Hour)
+		if editAt.After(s.opt.Now) {
+			editAt = at.Add(s.opt.Now.Sub(at) / 2)
+		}
+		e, err := s.db.PublishAt(ctx, rec, rev, editAt)
 		if err != nil {
 			return fmt.Errorf("edit %s %s: %w", p.route, p.model, err)
 		}
 		s.res.Revisions++
-		editAt = at.Add(time.Duration(s.r.IntN(72)) * time.Hour)
 		revisionID = e.Revision.ID
 	}
 	hits := int(s.r.ExpFloat64() * 4)

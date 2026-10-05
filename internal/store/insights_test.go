@@ -108,9 +108,28 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if want := (model.OutcomeCounts{Requests: 13, Hits: 6, Misses: 2, Recorded: 2, Interrupted: 1, Errors: 2}); tot.OutcomeCounts != want {
 		t.Fatalf("counts %+v, want %+v", tot.OutcomeCounts, want)
 	}
-	// hits / (hits + misses + recorded after a lookup miss) = 6 / (6+2+1)
-	if tot.HitRate == nil || math.Abs(*tot.HitRate-6.0/9) > 1e-9 {
+	// Lookups that found a recording over all lookups, whatever followed:
+	// the interrupted replay still hit, and the recorded, error and incomplete
+	// calls after a lookup miss still missed; Record mode's bypass is neither.
+	// 7 / (7 + 5).
+	if !floatIs(tot.HitRate, 7.0/12) || tot.Lookups != 12 || tot.LookupHits != 7 {
 		t.Fatalf("hit rate %v", tot.HitRate)
+	}
+	// /api/analytics reports the same rate for the same rows.
+	if a, err := s.Analytics(ctx, cid, from, to); err != nil || !floatIs(a.HitRate, 7.0/12) {
+		t.Fatalf("analytics hit rate %v (%v), insights %v", a.HitRate, err, *tot.HitRate)
+	}
+	var bucketHits, bucketRated int
+	for _, b := range in.Series {
+		if b.HitRate != nil {
+			bucketRated++
+			if b.Hits > 0 {
+				bucketHits++
+			}
+		}
+	}
+	if bucketRated == 0 || bucketHits == 0 {
+		t.Fatalf("series buckets carry no hit rate: %+v", in.Series)
 	}
 	if want := (model.TokenTotals{Input: 110, CachedInput: 40, Output: 55, Reasoning: 10}); tot.UpstreamTokens != want {
 		t.Fatalf("upstream tokens %+v", tot.UpstreamTokens)
@@ -138,13 +157,13 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if names["claude-x"].UpstreamCost != nil || names["claude-x"].SavedCost != nil || !floatIs(names["gpt-a-2025"].SavedCost, 0.03) {
 		t.Fatalf("model costs %+v", names["claude-x"])
 	}
-	// Per-model hit rates: 4/(4+1 recorded after a miss); 2/2 (recorded in
-	// bypass does not count); 0/1 (one miss; error, incomplete, interrupted
-	// do not count); 0/1.
-	if !floatIs(names["gpt-a-2025"].HitRate, 0.8) || !floatIs(names["claude-x"].HitRate, 1) || !floatIs(names["gpt-a"].HitRate, 0) || !floatIs(names["unknown"].HitRate, 0) {
+	// Per-model hit rates by lookup: 4/(4+1 recorded after a miss); 2/2
+	// (Record mode's bypass is no lookup); 1/4 (the interrupted replay hit;
+	// the miss, error and incomplete calls missed); 0/1.
+	if !floatIs(names["gpt-a-2025"].HitRate, 0.8) || !floatIs(names["claude-x"].HitRate, 1) || !floatIs(names["gpt-a"].HitRate, 0.25) || !floatIs(names["unknown"].HitRate, 0) {
 		t.Fatalf("model hit rates %v %v %v %v", names["gpt-a-2025"].HitRate, names["claude-x"].HitRate, names["gpt-a"].HitRate, names["unknown"].HitRate)
 	}
-	if len(in.Routes) != 1 || in.Routes[0].Route != chatRoute || in.Routes[0].Requests != 13 || !floatIs(in.Routes[0].HitRate, 6.0/9) {
+	if len(in.Routes) != 1 || in.Routes[0].Route != chatRoute || in.Routes[0].Requests != 13 || !floatIs(in.Routes[0].HitRate, 7.0/12) {
 		t.Fatalf("routes %+v", in.Routes)
 	}
 	// Replay durations 5, 20, 70, 50, 100000, 2 (one hit has none).

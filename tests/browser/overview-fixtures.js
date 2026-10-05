@@ -79,6 +79,11 @@ function rng(seed) {
 }
 
 const tokens = () => ({ input: 0, cached_input: 0, output: 0, reasoning: 0 });
+/** Adds the server's per-slice hit rate (Auto mode: every call looked up). */
+const withRate = (c) => {
+  const lookups = c.hits + c.misses + c.recorded;
+  return { ...c, hit_rate: lookups ? c.hits / lookups : null };
+};
 const counts = () => ({
   requests: 0,
   hits: 0,
@@ -266,6 +271,7 @@ function buildInsights({
       }),
     counts(),
   );
+  // The fixtures model Auto mode, where every call looks up a recording.
   const lookups = totals.hits + totals.misses + totals.recorded;
   const sumTokens = (k) => all.reduce((acc, a) => addInto(acc, a[k]), tokens());
   const sumCost = (k) =>
@@ -346,15 +352,17 @@ function buildInsights({
     totals: {
       ...totals,
       hit_rate: lookups ? totals.hits / lookups : null,
+      lookups,
+      lookup_hits: totals.hits,
       upstream_tokens: sumTokens("upstream_tokens"),
       replayed_tokens: sumTokens("replayed_tokens"),
       upstream_cost: sumCost("upstream_cost"),
       saved_cost: sumCost("saved_cost"),
       threads: empty ? 0 : Math.round(totals.requests / 9),
     },
-    series,
-    models: modelList,
-    routes: [...routes.values()],
+    series: series.map(withRate),
+    models: modelList.map(withRate),
+    routes: [...routes.values()].map(withRate),
     latency: { upstream: merge("up"), replay: merge("re") },
     top_recordings,
     top_threads,

@@ -206,16 +206,16 @@ func (l *latencies) add(r *historyRow) {
 	}
 }
 
-// hitRate is hits / (hits + misses + recorded rows whose lookup missed);
-// interrupted replays and failed calls count on neither side.
+// hitRate is the cache hit rate shared with /api/analytics: lookups that
+// found a recording over all lookups, whatever happened after the lookup.
 type hitRate struct{ hits, den int64 }
 
 func (h *hitRate) add(r *historyRow) {
-	switch {
-	case r.outcome == "hit":
+	switch cacheLookup(r.outcome, r.lookup) {
+	case "hit":
 		h.hits++
 		h.den++
-	case r.outcome == "miss", r.outcome == "recorded" && r.lookup == "miss":
+	case "miss":
 		h.den++
 	}
 }
@@ -360,6 +360,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 	type bucketAgg struct {
 		model.InsightBucket
 		tokens tokenSet
+		rate   hitRate
 	}
 	type modelAgg struct {
 		counts model.OutcomeCounts
@@ -405,6 +406,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 		if b := buckets[r.at.Truncate(step)]; b != nil {
 			b.Count(r.outcome)
 			b.tokens.add(r)
+			b.rate.add(r)
 		}
 		name := r.model()
 		m := models[name]
@@ -439,12 +441,13 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 			}
 		}
 	}
-	out.Totals.HitRate = rate.value()
+	out.Totals.HitRate, out.Totals.Lookups, out.Totals.LookupHits = rate.value(), rate.den, rate.hits
 	out.Totals.UpstreamTokens, out.Totals.ReplayedTokens = totals.upstream, totals.replayed
 	out.Totals.UpstreamCost, out.Totals.SavedCost = totals.upstreamCost.value(), totals.savedCost.value()
 	out.Totals.Threads = int64(len(threads))
 	for _, b := range order {
 		b.UpstreamTokens, b.ReplayedTokens = b.tokens.upstream, b.tokens.replayed
+		b.HitRate = b.rate.value()
 		out.Series = append(out.Series, b.InsightBucket)
 	}
 	for name, m := range models {

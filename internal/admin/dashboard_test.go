@@ -58,7 +58,7 @@ func TestDashboardEndpoints(t *testing.T) {
 		t.Fatalf("insights keys %s", got)
 	}
 	totals := raw["totals"].(map[string]any)
-	if got := keys(totals); got != "errors,hit_rate,hits,interrupted,misses,recorded,replayed_tokens,requests,saved_cost,threads,upstream_cost,upstream_tokens" {
+	if got := keys(totals); got != "errors,hit_rate,hits,interrupted,lookup_hits,lookups,misses,recorded,replayed_tokens,requests,saved_cost,threads,upstream_cost,upstream_tokens" {
 		t.Fatalf("totals keys %s", got)
 	}
 	if totals["requests"] != 3.0 || totals["hit_rate"] != 1.0/3 || totals["saved_cost"] != nil || totals["threads"] != 1.0 {

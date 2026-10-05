@@ -324,19 +324,26 @@ func (s *Store) Lookup(ctx context.Context, cid int64, key string) (model.Entry,
 }
 
 func (s *Store) Publish(ctx context.Context, rec model.Recording, rev model.Revision) (model.Entry, error) {
-	return s.publish(ctx, rec, rev, nil)
+	return s.publish(ctx, rec, rev, nil, now())
+}
+
+// PublishAt is Publish with an explicit creation time for the revision (and
+// the recording, when it is new). It exists for seeding synthetic history;
+// live traffic and edits always use Publish, which stamps the current time.
+func (s *Store) PublishAt(ctx context.Context, rec model.Recording, rev model.Revision, at time.Time) (model.Entry, error) {
+	return s.publish(ctx, rec, rev, nil, at.UTC().Format(time.RFC3339Nano))
 }
 
 // PublishIfActive prevents a stale editor from replacing a revision activated
 // after it loaded the recording. expectedRevisionID is zero for a new key.
 func (s *Store) PublishIfActive(ctx context.Context, rec model.Recording, rev model.Revision, expectedRevisionID int64) (model.Entry, error) {
-	return s.publish(ctx, rec, rev, &expectedRevisionID)
+	return s.publish(ctx, rec, rev, &expectedRevisionID, now())
 }
 
 // publish stores rev as the active revision of rec's key. The recording's
 // request is always its active revision's request; MatchingInput is derived
 // from it and, when a caller supplies one, must agree.
-func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revision, expectedRevisionID *int64) (model.Entry, error) {
+func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revision, expectedRevisionID *int64, at string) (model.Entry, error) {
 	if rec.CollectionID == 0 || rec.Key == "" || rec.Route == "" {
 		return model.Entry{}, errors.New("recording collection, key, and route are required")
 	}
@@ -404,7 +411,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 		if expectedRevisionID != nil && *expectedRevisionID != 0 {
 			return model.Entry{}, ErrConflict
 		}
-		rec.CreatedAt = now()
+		rec.CreatedAt = at
 		res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, rec.UpstreamIdentity, rec.Streaming, rec.CreatedAt)
 		if e != nil {
 			return model.Entry{}, e
@@ -425,7 +432,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 		return model.Entry{}, err
 	}
 	rev.RecordingID = rec.ID
-	rev.CreatedAt = now()
+	rev.CreatedAt = at
 	res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, rev.Body, ej, bodyID, rev.Source, rev.CreatedAt)
 	if err != nil {
 		return model.Entry{}, err
@@ -657,9 +664,7 @@ func (s *Store) Analytics(ctx context.Context, cid int64, from, to time.Time) (m
 			samples[source] = set
 		}
 		set.total++
-		if cacheStatus == "" && (outcome == "hit" || outcome == "miss") {
-			cacheStatus = outcome
-		}
+		cacheStatus = cacheLookup(outcome, cacheStatus)
 		switch cacheStatus {
 		case "hit":
 			a.Hits++
@@ -707,6 +712,19 @@ func (s *Store) Analytics(ctx context.Context, cid int64, from, to time.Time) (m
 		a.Series = append(a.Series, *buckets[t])
 	}
 	return a, nil
+}
+
+// cacheLookup is what a call's recording lookup found: "hit" or "miss" for a
+// replay lookup, "bypass" for Record mode, "" when no lookup ran. It is the one
+// definition of the cache hit rate: hits over hits plus misses, counted
+// whether or not the call then succeeded (an interrupted replay still hit;
+// an Auto-mode miss whose upstream call failed still missed). Rows written
+// without a lookup outcome fall back to the call's outcome.
+func cacheLookup(outcome, lookup string) string {
+	if lookup == "" && (outcome == "hit" || outcome == "miss") {
+		return outcome
+	}
+	return lookup
 }
 
 func percentiles(values []int64) model.Percentiles {
