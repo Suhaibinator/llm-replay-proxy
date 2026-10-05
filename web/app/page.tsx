@@ -61,241 +61,41 @@ import {
 import { ResponseViewer } from "@/components/response-viewer";
 import { RequestViewer } from "@/components/request-viewer";
 import { formatBytes } from "@/lib/request-viewer";
-import { AuthGate, notifyAuthRequired } from "@/components/auth-required";
+import { AuthGate } from "@/components/auth-required";
+import {
+  type Collection,
+  type Settings,
+  type NumberSetting,
+  type Event,
+  type Revision,
+  type RequestSummary,
+  type Recording,
+  type RecordingSummary,
+  type Entry,
+  type History,
+  type Percentiles,
+  type Analytics,
+  emptyAnalytics,
+  type Diff,
+  defaults,
+  APIError,
+  api,
+  dateFormat,
+  utcDayFormat,
+  formatDate,
+  date,
+  bucketLabel,
+  pretty,
+  editableRevision,
+  download,
+  count,
+  HISTORY_ROWS,
+  shortKey,
+} from "@/lib/api";
+import { Empty, Outcome } from "@/components/common";
+
 import { cn } from "@/lib/utils";
 
-type Collection = {
-  id: number;
-  name: string;
-  exclusions: string[];
-  created_at: string;
-};
-type Settings = {
-  mode: "record" | "replay" | "auto";
-  active_collection_id: number;
-  first_event_delay_ms: number;
-  delay_multiplier: number;
-  history_limit: number;
-};
-type NumberSetting =
-  "first_event_delay_ms" | "delay_multiplier" | "history_limit";
-type Event = { data: string; offset_ms: number };
-type Revision = {
-  id: number;
-  recording_id: number;
-  status: number;
-  headers: Record<string, string>;
-  body: string;
-  events: Event[];
-  source: string;
-  created_at: string;
-};
-type RequestSummary = {
-  model: string;
-  items: number;
-  preview: string;
-  tool_calls: number;
-  images: number;
-  bytes: number;
-  thread: string;
-};
-type Recording = {
-  id: number;
-  collection_id: number;
-  key: string;
-  route: string;
-  upstream_identity: string;
-  streaming: boolean;
-  active_revision_id: number;
-  created_at: string;
-};
-type RecordingSummary = Recording & {
-  request: RequestSummary | null;
-  updated_at: string;
-  source: string;
-  revisions: number;
-  hits: number;
-  last_hit_at: string;
-};
-type Entry = {
-  recording: Recording;
-  revision: Revision;
-  revisions?: Revision[];
-  text?: string;
-  text_unavailable_reason?: string;
-  request_text?: string;
-  matching_input_text?: string;
-};
-type History = {
-  id: number;
-  collection_id: number;
-  route: string;
-  key: string;
-  request: RequestSummary | null;
-  outcome: string;
-  detail: string;
-  recording_id: number;
-  created_at: string;
-  request_text?: string;
-  source: string;
-  duration_ms: number | null;
-  first_event_ms: number | null;
-  lookup_outcome: string;
-};
-type Percentiles = {
-  p50: number | null;
-  p95: number | null;
-  p99: number | null;
-  samples: number;
-};
-type Analytics = {
-  total: number;
-  lifetime_total: number;
-  hits: number;
-  misses: number;
-  errors: number;
-  recorded: number;
-  hit_rate: number | null;
-  sources: Record<
-    string,
-    { total: number; duration_ms: Percentiles; first_event_ms: Percentiles }
-  >;
-  series: {
-    start: string;
-    total: number;
-    hits: number;
-    misses: number;
-    errors: number;
-  }[];
-};
-const emptyAnalytics: Analytics = {
-  total: 0,
-  lifetime_total: 0,
-  hits: 0,
-  misses: 0,
-  errors: 0,
-  recorded: 0,
-  hit_rate: null,
-  sources: {},
-  series: [],
-};
-type Diff = {
-  path: string;
-  request: unknown;
-  recorded: unknown;
-  request_exists: boolean;
-  recorded_exists: boolean;
-  request_display: string;
-  recorded_display: string;
-};
-const defaults: Settings = {
-  mode: "replay",
-  active_collection_id: 0,
-  first_event_delay_ms: 0,
-  delay_multiplier: 1,
-  history_limit: 10000,
-};
-class APIError extends Error {
-  code: string;
-  constructor(message: string, code = "request_failed") {
-    super(message);
-    this.code = code;
-  }
-}
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body instanceof Uint8Array
-        ? {}
-        : { "Content-Type": "application/json" }),
-      ...init?.headers,
-    },
-  });
-  if (res.status === 401) notifyAuthRequired();
-  if (!res.ok) {
-    let msg = `Request failed (${res.status})`,
-      code = "request_failed";
-    try {
-      const x = await res.json();
-      msg = x.error?.message || msg;
-      code = x.error?.code || code;
-    } catch {}
-    throw new APIError(msg, code);
-  }
-  return res.status === 204 ? (undefined as T) : res.json();
-}
-const dateFormat = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-});
-const utcDayFormat = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  timeZone: "UTC",
-});
-const formatDate = (format: Intl.DateTimeFormat, s: string) => {
-  if (!s) return "—";
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? s : format.format(d);
-};
-const date = (s: string) => formatDate(dateFormat, s);
-const bucketLabel = (s: string, range: string) =>
-  range === "24h" ? date(s) : `${formatDate(utcDayFormat, s)} (UTC)`;
-const pretty = (v: unknown) => JSON.stringify(v, null, 2);
-const editableRevision = (revision: Revision) => ({
-  status: revision.status,
-  headers: revision.headers,
-  body: revision.body,
-  events: revision.events,
-});
-const download = (href: string) => {
-  const link = document.createElement("a");
-  link.href = href;
-  link.download = "";
-  link.click();
-};
-const count = (n: number, one: string) =>
-  `${n.toLocaleString()} ${one}${n === 1 ? "" : "s"}`;
-// The history list shows the newest rows; the API's default page is 200.
-const HISTORY_ROWS = 200;
-const shortKey = (s: string) => (s ? `${s.slice(0, 8)}…${s.slice(-5)}` : "—");
-function Outcome({ value }: { value: string }) {
-  const hit = /hit|recorded|success/i.test(value),
-    miss = /miss/i.test(value);
-  return (
-    <Badge
-      className={cn(
-        hit && "border-emerald-200 bg-emerald-50 text-emerald-700",
-        miss && "border-amber-200 bg-amber-50 text-amber-700",
-        !hit && !miss && "border-red-200 bg-red-50 text-red-700",
-      )}
-    >
-      {value || "unknown"}
-    </Badge>
-  );
-}
-function Empty({
-  icon: Icon,
-  title,
-  body,
-}: {
-  icon: typeof Database;
-  title: string;
-  body: string;
-}) {
-  return (
-    <div className="flex min-h-56 flex-col items-center justify-center px-5 text-center">
-      <div className="mb-3 rounded-xl bg-muted p-3">
-        <Icon className="size-5 text-muted-foreground" />
-      </div>
-      <p className="font-medium">{title}</p>
-      <p className="mt-1 max-w-sm text-sm text-muted-foreground">{body}</p>
-    </div>
-  );
-}
 function AnalyticsDashboard({
   analytics,
   collections,

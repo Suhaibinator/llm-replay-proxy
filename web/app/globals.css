@@ -15,6 +15,17 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-destructive: var(--destructive);
+  --color-hit: var(--hit);
+  --color-miss: var(--miss);
+  --color-recorded: var(--recorded);
+  --color-interrupted: var(--interrupted);
+  --color-error: var(--error);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
   --font-sans: var(--font-ui);
   --font-mono: var(--font-code);
 }
@@ -33,6 +44,19 @@
   --input: #cfd4cc;
   --ring: #4b7a5c;
   --destructive: #bd3e36;
+  /* Outcome colors: one meaning everywhere (badges, charts, timelines). */
+  --hit: #2f8a57;
+  --miss: #c98a1b;
+  --recorded: #3a6ea5;
+  --interrupted: #8a6fb0;
+  --error: #c2453b;
+  /* Categorical series (models, routes), in order. */
+  --chart-1: #315c42;
+  --chart-2: #3a6ea5;
+  --chart-3: #c98a1b;
+  --chart-4: #8a6fb0;
+  --chart-5: #2f8f8a;
+  --chart-6: #a0525f;
   --font-ui:
     Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-code: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
