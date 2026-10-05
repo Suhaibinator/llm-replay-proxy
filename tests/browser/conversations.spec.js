@@ -105,7 +105,7 @@ test("a missed turn explains why it did not replay", async ({ page }) => {
   // Another candidate: an earlier turn, so this request continues past it.
   await dialog.locator("label").filter({ hasText: "#111" }).click();
   await expect(
-    dialog.getByText("3 more input items in this request"),
+    dialog.getByText("3 more entries in input in this request"),
   ).toBeVisible();
 
   // The request itself is still readable below.

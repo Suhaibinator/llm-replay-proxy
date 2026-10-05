@@ -365,8 +365,8 @@ for (const route of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
                     : [];
         await request.fulfill({ json: data });
       });
-      await page.goto("/");
-      await page.getByRole("button", { name: "Inspect", exact: true }).click();
+      // The shell deep-links the recording inspector from the hash.
+      await page.goto("/#/recordings?recording=1");
       const viewer = page.getByRole("region", { name: "Response browser" });
       await expect(viewer).toBeVisible();
       await expect(

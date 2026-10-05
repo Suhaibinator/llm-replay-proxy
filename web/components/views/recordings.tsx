@@ -153,7 +153,9 @@ export function RecordingsView(props: ViewProps) {
   return (
     <div className="space-y-3" ref={topRef}>
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-muted-foreground tabular-nums">
-        <h2 className="text-base font-semibold text-foreground">Recordings</h2>
+        <h2 className="text-xl font-semibold tracking-tight text-foreground">
+          Recordings
+        </h2>
         <p aria-live="polite">
           {loaded &&
             (isFiltered

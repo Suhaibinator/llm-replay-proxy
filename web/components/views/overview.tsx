@@ -158,7 +158,7 @@ export function OverviewView(props: ViewProps) {
   const filters = (
     <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
       <div className="min-w-0">
-        <h2 className="text-lg font-semibold tracking-tight">Overview</h2>
+        <h2 className="text-xl font-semibold tracking-tight">Overview</h2>
         <p className="text-sm text-muted-foreground">
           {collection ? (
             <span className="font-medium text-foreground">

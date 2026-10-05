@@ -298,7 +298,9 @@ function CandidateCard({
             </span>
           )}
           {c.model && <Chip>{c.model}</Chip>}
-          <Chip>{c.items.toLocaleString()} items</Chip>
+          <Chip>
+            {c.items.toLocaleString()} item{c.items === 1 ? "" : "s"}
+          </Chip>
         </div>
         <p className="line-clamp-2 text-sm text-muted-foreground">
           {c.preview || "No user text"}

@@ -132,7 +132,7 @@ export function TrafficView(props: ViewProps) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <h2 className="text-base font-semibold">Traffic</h2>
+        <h2 className="text-xl font-semibold tracking-tight">Traffic</h2>
         <LiveToggle
           paused={pausedAt !== null}
           waiting={waiting}

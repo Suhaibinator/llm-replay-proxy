@@ -55,8 +55,11 @@ export function DiffReportView({
               <p>
                 <span className="font-medium">
                   {report.appended.count.toLocaleString()} more{" "}
-                  {report.appended.collection} item
-                  {report.appended.count === 1 ? "" : "s"} in this request
+                  {report.appended.count === 1 ? "entry" : "entries"} in{" "}
+                  <code className="font-mono">
+                    {report.appended.collection}
+                  </code>{" "}
+                  in this request
                 </span>{" "}
                 <span className="text-muted-foreground">
                   from item {report.appended.from + 1} onward. The recording

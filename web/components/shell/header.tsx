@@ -224,7 +224,7 @@ export function Header(props: HeaderProps) {
         <Nav
           view={view}
           onNavigate={onNavigate}
-          className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none]"
+          className="min-w-0 flex-1 overflow-x-auto [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)] [scrollbar-width:none]"
         />
         {!wide && (
           <CollectionSwitcher {...props} className="my-1 w-32 shrink-0" />
