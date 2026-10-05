@@ -48,6 +48,9 @@ test('control panel completes the record, inspect, edit, compare, restore, expor
   await expect(page.getByRole('region', { name: 'Response browser' })).toContainText('fixture answer');
   await expect(page.getByRole('dialog')).toContainText('fixture answer');
 
+  await page.getByRole('tab', { name: 'Request' }).click();
+  await expect(page.getByRole('tabpanel', { name: 'Request' })).toContainText('hello browser');
+
   await page.getByRole('tab', { name: 'Plain text' }).click();
   await page.getByRole('dialog').getByRole('textbox').fill('edited browser answer');
   await page.getByRole('button', { name: 'Save new revision' }).click();

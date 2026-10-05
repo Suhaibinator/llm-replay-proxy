@@ -70,6 +70,124 @@ const frame = (value, offset_ms) => ({
   data: `data: ${JSON.stringify(value)}\n\n`,
   offset_ms,
 });
+const png = "iVBORw0KGgo=";
+const result = '{"city":"Paris"}';
+// One conversation per protocol: instructions, a user turn with an image, a
+// tool call and its JSON result.
+function requestFixture(route, stream) {
+  if (route.endsWith("completions"))
+    return {
+      model: "fixture",
+      stream,
+      messages: [
+        { role: "system", content: "Rules" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Find Paris" },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${png}` },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_viewer",
+              type: "function",
+              function: { name: "lookup", arguments: "{}" },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_viewer", content: result },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            description: "Look up a city",
+            parameters: { type: "object" },
+          },
+        },
+      ],
+    };
+  if (route.endsWith("responses"))
+    return {
+      model: "fixture",
+      stream,
+      instructions: "Rules",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "Find Paris" },
+            { type: "input_image", image_url: `data:image/png;base64,${png}` },
+          ],
+        },
+        {
+          type: "function_call",
+          call_id: "call_viewer",
+          name: "lookup",
+          arguments: "{}",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_viewer",
+          output: result,
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          description: "Look up a city",
+          parameters: { type: "object" },
+        },
+      ],
+    };
+  return {
+    model: "fixture",
+    stream,
+    max_tokens: 10,
+    system: "Rules",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Find Paris" },
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: png },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "call_viewer", name: "lookup", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "call_viewer", content: result },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: "lookup",
+        description: "Look up a city",
+        input_schema: { type: "object" },
+      },
+    ],
+  };
+}
+
 function fixture(route, streaming) {
   let body = "",
     events = [];
@@ -153,7 +271,7 @@ function fixture(route, streaming) {
       key: "viewer-key",
       route,
       streaming,
-      request: { model: "fixture", stream: streaming },
+      request: requestFixture(route, streaming),
       matching_input: {},
       upstream_identity: "fixture",
       active_revision_id: 1,
@@ -280,6 +398,49 @@ for (const route of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
       }
       await page.screenshot({
         path: testInfo.outputPath("viewer.png"),
+        fullPage: true,
+      });
+
+      await page.getByRole("tab", { name: "Request", exact: true }).click();
+      const request = page.getByRole("region", { name: "Request browser" });
+      await expect(request).toBeVisible();
+      const conversation = request.getByRole("list", {
+        name: "Request conversation",
+      });
+      await expect(
+        conversation.getByText("Rules", { exact: true }),
+      ).toBeVisible();
+      await expect(
+        conversation.getByText("Find Paris", { exact: true }),
+      ).toBeVisible();
+      await expect(
+        conversation.getByRole("img", { name: /PNG image/ }),
+      ).toHaveCount(1);
+      await expect(conversation.getByText("No arguments")).toBeVisible();
+      await expect(conversation.getByText("Result of")).toBeVisible();
+      await expect(
+        conversation.getByText("call_viewer", { exact: true }),
+      ).toHaveCount(2);
+      await expect(
+        conversation.getByText("Paris", { exact: true }),
+      ).toBeVisible();
+      expect(
+        await request.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+      ).toBe(true);
+      await request.getByRole("tab", { name: /^Tools/ }).click();
+      await expect(request.getByText("Look up a city")).toBeVisible();
+      await request
+        .getByRole("tab", { name: "Parameters", exact: true })
+        .click();
+      await expect(request.getByText("model", { exact: true })).toBeVisible();
+      await request.getByRole("tab", { name: "Raw", exact: true }).click();
+      await expect(request.getByLabel("Raw request")).toContainText(
+        "Find Paris",
+      );
+      await page.screenshot({
+        path: testInfo.outputPath("request.png"),
         fullPage: true,
       });
       expect(errors).toEqual([]);
