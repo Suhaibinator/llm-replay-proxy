@@ -24,4 +24,19 @@ REPLAY_BROWSER_BASE_URL=http://127.0.0.1:18080 \
   --config=tests/browser/response-viewer.config.js
 ```
 
+The overview, conversations and traffic/recordings views have mocked suites
+of their own, run the same way:
+
+```sh
+for suite in overview conversations traffic; do
+  REPLAY_BROWSER_BASE_URL=http://127.0.0.1:18080 \
+    npx --prefix tests/browser playwright test \
+    --config=tests/browser/$suite.config.js
+done
+```
+
+To look at the console with realistic data instead of fixtures, seed a
+database (see docs/dashboard-api.md) and serve it with a loopback config that
+sets `"auth": {"disabled": true}`.
+
 Build `web/out` before starting the proxy. Test screenshots and traces are written below `tests/browser/test-results/`.

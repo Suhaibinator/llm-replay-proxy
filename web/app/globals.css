@@ -15,57 +15,231 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-destructive: var(--destructive);
+  --color-warn: var(--warn);
+  --color-code: var(--code);
+  --color-code-foreground: var(--code-foreground);
+  --color-hit: var(--hit);
+  --color-miss: var(--miss);
+  --color-recorded: var(--recorded);
+  --color-interrupted: var(--interrupted);
+  --color-error: var(--error);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
   --font-sans: var(--font-ui);
   --font-mono: var(--font-code);
 }
+
+/*
+ * Light theme. Every text color here clears WCAG AA (4.5:1) on the surface it
+ * is meant for; outcome colors are also readable as text on --background and
+ * --card, so badges, chart legends and inline labels can share one hue.
+ */
 :root {
-  --background: #f7f7f4;
-  --foreground: #171916;
-  --card: #fff;
-  --card-foreground: #171916;
-  --primary: #315c42;
-  --primary-foreground: #fff;
-  --secondary: #e8ece6;
-  --secondary-foreground: #24362a;
-  --muted: #eef0eb;
-  --muted-foreground: #596159;
-  --border: #daddd6;
-  --input: #cfd4cc;
-  --ring: #4b7a5c;
-  --destructive: #bd3e36;
+  color-scheme: light;
+  --background: #f6f6f2;
+  --foreground: #1a1c19;
+  --card: #ffffff;
+  --card-foreground: #1a1c19;
+  --primary: #2d5a40;
+  --primary-foreground: #ffffff;
+  --secondary: #e6eae4;
+  --secondary-foreground: #22352a;
+  --muted: #edefe9;
+  --muted-foreground: #5a625a;
+  --border: #d9dcd4;
+  --input: #c7ccc3;
+  --ring: #3f7a57;
+  --destructive: #b3362e;
+  /* Modes that call upstream and spend money. */
+  --warn: #8f5200;
+  /* Raw payload panels. */
+  --code: #15181b;
+  --code-foreground: #d9ddd3;
+  /* Outcome colors: one meaning everywhere (badges, charts, timelines). */
+  --hit: #257a4a;
+  --miss: #a36f0c;
+  --recorded: #2e69b2;
+  --interrupted: #7555a8;
+  --error: #c2453b;
+  /*
+   * Categorical series (models, routes), in order. Validated with the dataviz
+   * palette checker for adjacent-pair CVD separation; slot 6 (teal) sits just
+   * under the chroma floor because sRGB has no teal with 4.5:1 text contrast
+   * and more chroma, so use it last.
+   */
+  --chart-1: #298646;
+  --chart-2: #2e69b2;
+  --chart-3: #a36f0c;
+  --chart-4: #7555a8;
+  --chart-5: #a04034;
+  --chart-6: #007677;
+  --selection: #cfe0d3;
   --font-ui:
-    Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-code: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-code:
+    ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
 }
+
+/*
+ * Dark theme: applied when the system prefers it (unless the viewer picked
+ * light) or when the viewer picked dark. Surfaces keep the faint green cast;
+ * outcome and chart hues are lifted so they keep contrast on dark ground.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --background: #121412;
+    --foreground: #e4e7e0;
+    --card: #1a1d1a;
+    --card-foreground: #e4e7e0;
+    --primary: #6fbf8e;
+    --primary-foreground: #0d1f14;
+    --secondary: #263029;
+    --secondary-foreground: #d5e3d9;
+    --muted: #222622;
+    --muted-foreground: #a0a89f;
+    --border: #2e332e;
+    --input: #3d433d;
+    --ring: #7cc69a;
+    --destructive: #e0675e;
+    --warn: #e3a94f;
+    --code: #0d0f11;
+    --code-foreground: #d4d8ce;
+    --hit: #47aa62;
+    --miss: #c38824;
+    --recorded: #578ed4;
+    --interrupted: #987aca;
+    --error: #db6c66;
+    --chart-1: #47aa62;
+    --chart-2: #578ed4;
+    --chart-3: #c38824;
+    --chart-4: #987aca;
+    --chart-5: #cf6b5b;
+    --chart-6: #16a7a3;
+    --selection: #2f4a39;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #121412;
+  --foreground: #e4e7e0;
+  --card: #1a1d1a;
+  --card-foreground: #e4e7e0;
+  --primary: #6fbf8e;
+  --primary-foreground: #0d1f14;
+  --secondary: #263029;
+  --secondary-foreground: #d5e3d9;
+  --muted: #222622;
+  --muted-foreground: #a0a89f;
+  --border: #2e332e;
+  --input: #3d433d;
+  --ring: #7cc69a;
+  --destructive: #e0675e;
+  --warn: #e3a94f;
+  --code: #0d0f11;
+  --code-foreground: #d4d8ce;
+  --hit: #47aa62;
+  --miss: #c38824;
+  --recorded: #578ed4;
+  --interrupted: #987aca;
+  --error: #db6c66;
+  --chart-1: #47aa62;
+  --chart-2: #578ed4;
+  --chart-3: #c38824;
+  --chart-4: #987aca;
+  --chart-5: #cf6b5b;
+  --chart-6: #16a7a3;
+  --selection: #2f4a39;
+}
+
 * {
   border-color: var(--border);
+}
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-ui);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
 }
 ::selection {
-  background: #cfe0d3;
+  background: var(--selection);
 }
 button,
-a {
+a,
+summary,
+[role="button"] {
   cursor: pointer;
+}
+button:disabled {
+  cursor: default;
 }
 code,
 pre,
+kbd,
 textarea.code {
   font-family: var(--font-code);
 }
+/* Numbers line up in tables and stat tiles. */
+.tnum,
+table,
+time,
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+/* Default focus ring for anything that forgets its own. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+/* Thin, theme-aware scrollbars for the many scrolling panels. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--foreground) 22%, transparent)
+    transparent;
+}
 .grid-bg {
   background-image:
-    linear-gradient(to right, rgba(49, 92, 66, 0.045) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(49, 92, 66, 0.045) 1px, transparent 1px);
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--primary) 6%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--primary) 6%, transparent) 1px,
+      transparent 1px
+    );
   background-size: 24px 24px;
+}
+/* The recording light on the mode switch. */
+@keyframes rec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.rec-light {
+  animation: rec-pulse 1.6s ease-in-out infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   * {
     scroll-behavior: auto !important;
     transition-duration: 0s !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }

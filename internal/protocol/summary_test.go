@@ -49,8 +49,12 @@ func TestSummaryThreadIsSharedByLaterTurns(t *testing.T) {
 	if first.Thread == "" || first.Thread != later.Thread || first.Thread == other.Thread {
 		t.Fatalf("threads %q %q %q", first.Thread, later.Thread, other.Thread)
 	}
-	if later.Preview != "more" {
-		t.Fatalf("preview %q", later.Preview)
+	if later.Preview != "more" || later.Opening != "hi" || first.Opening != "hi" {
+		t.Fatalf("preview %q opening %q %q", later.Preview, later.Opening, first.Opening)
+	}
+	tools := SummarizeRequest(MessagesRoute, []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t"}]},{"role":"user","content":"  real   start "},{"role":"user","content":"last"}]}`))
+	if tools.Opening != "real start" || tools.Preview != "last" {
+		t.Fatalf("opening %q preview %q", tools.Opening, tools.Preview)
 	}
 }
 

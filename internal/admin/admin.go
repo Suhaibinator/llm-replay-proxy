@@ -53,6 +53,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.history(w, r)
 	case p == "/api/analytics":
 		h.analytics(w, r)
+	case p == "/api/insights":
+		h.insights(w, r)
+	case p == "/api/threads":
+		h.threads(w, r)
+	case strings.HasPrefix(p, "/api/threads/"):
+		h.threadDetail(w, r, p)
 	case p == "/api/import":
 		h.importDB(w, r)
 	case p == "/api/compare":
@@ -73,38 +79,12 @@ func (h *handler) analytics(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, "GET, HEAD")
 		return
 	}
-	id, ok := queryID(w, r, "collection_id")
+	id, ok := collectionQuery(w, h, r)
 	if !ok {
 		return
 	}
-	if _, err := h.db.Collection(r.Context(), id); err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	to := time.Now().UTC()
-	from := to.Add(-24 * time.Hour)
-	parse := func(name string, dst *time.Time) bool {
-		raw := r.URL.Query().Get(name)
-		if raw == "" {
-			return true
-		}
-		v, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			writeError(w, 400, "invalid_request", name+" must be RFC3339")
-			return false
-		}
-		*dst = v.UTC()
-		return true
-	}
-	if !parse("from", &from) || !parse("to", &to) {
-		return
-	}
-	if !from.Before(to) {
-		writeError(w, 400, "invalid_request", "from must be before to")
-		return
-	}
-	if to.Sub(from) > 366*24*time.Hour {
-		writeError(w, 400, "invalid_request", "analytics range cannot exceed 366 days")
+	from, to, ok := boundedRange(w, r)
+	if !ok {
 		return
 	}
 	v, err := h.db.Analytics(r.Context(), id, from, to)
@@ -113,6 +93,144 @@ func (h *handler) analytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, v)
+}
+
+// insights serves the dashboard aggregates; same range rules as analytics.
+func (h *handler) insights(w http.ResponseWriter, r *http.Request) {
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
+		return
+	}
+	id, ok := collectionQuery(w, h, r)
+	if !ok {
+		return
+	}
+	from, to, ok := boundedRange(w, r)
+	if !ok {
+		return
+	}
+	v, err := h.db.Insights(r.Context(), id, from, to, r.URL.Query().Get("model"))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+func (h *handler) threads(w http.ResponseWriter, r *http.Request) {
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
+		return
+	}
+	id, ok := collectionQuery(w, h, r)
+	if !ok {
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, 400, "invalid_request", "limit must be between 1 and 500")
+			return
+		}
+		limit = n
+	}
+	var from, to time.Time
+	if !parseTime(w, r, "from", &from) || !parseTime(w, r, "to", &to) {
+		return
+	}
+	if !from.IsZero() && !to.IsZero() && !from.Before(to) {
+		writeError(w, 400, "invalid_request", "from must be before to")
+		return
+	}
+	v, err := h.db.Threads(r.Context(), id, limit, from, to)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+// threadDetail serves /api/threads/{thread}; a thread is the 16 lowercase
+// hex digits of a request summary's thread fingerprint.
+func (h *handler) threadDetail(w http.ResponseWriter, r *http.Request, p string) {
+	thread := strings.TrimPrefix(p, "/api/threads/")
+	if !validThread(thread) {
+		writeError(w, 404, "not_found", "endpoint not found")
+		return
+	}
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
+		return
+	}
+	id, ok := queryID(w, r, "collection_id")
+	if !ok {
+		return
+	}
+	v, err := h.db.Thread(r.Context(), id, thread)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+func validThread(v string) bool {
+	if len(v) != 16 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if !(v[i] >= '0' && v[i] <= '9' || v[i] >= 'a' && v[i] <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// collectionQuery reads collection_id and checks the collection exists.
+func collectionQuery(w http.ResponseWriter, h *handler, r *http.Request) (int64, bool) {
+	id, ok := queryID(w, r, "collection_id")
+	if !ok {
+		return 0, false
+	}
+	if _, err := h.db.Collection(r.Context(), id); err != nil {
+		writeStoreError(w, err)
+		return 0, false
+	}
+	return id, true
+}
+
+// parseTime reads an optional RFC 3339 query parameter into dst, in UTC.
+func parseTime(w http.ResponseWriter, r *http.Request, name string, dst *time.Time) bool {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return true
+	}
+	v, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		writeError(w, 400, "invalid_request", name+" must be RFC3339")
+		return false
+	}
+	*dst = v.UTC()
+	return true
+}
+
+// boundedRange reads from/to: the last 24 hours by default, at most 366 days.
+func boundedRange(w http.ResponseWriter, r *http.Request) (time.Time, time.Time, bool) {
+	to := time.Now().UTC()
+	from := to.Add(-24 * time.Hour)
+	if !parseTime(w, r, "from", &from) || !parseTime(w, r, "to", &to) {
+		return from, to, false
+	}
+	if !from.Before(to) {
+		writeError(w, 400, "invalid_request", "from must be before to")
+		return from, to, false
+	}
+	if to.Sub(from) > 366*24*time.Hour {
+		writeError(w, 400, "invalid_request", "analytics range cannot exceed 366 days")
+		return from, to, false
+	}
+	return from, to, true
 }
 
 func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
@@ -264,15 +382,26 @@ func (h *handler) history(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, v)
 }
 
-// historyItem serves one history row with its exact request text.
+// historyItem serves one history row with its exact request text, and
+// /api/history/{id}/nearest its closest recordings.
 func (h *handler) historyItem(w http.ResponseWriter, r *http.Request, p string) {
-	id, ok := parseID(strings.TrimPrefix(p, "/api/history/"))
-	if !ok {
+	parts := strings.Split(strings.TrimPrefix(p, "/api/history/"), "/")
+	id, ok := parseID(parts[0])
+	if !ok || len(parts) > 2 || (len(parts) == 2 && parts[1] != "nearest") {
 		writeError(w, 404, "not_found", "endpoint not found")
 		return
 	}
 	if !isRead(r) {
 		methodNotAllowed(w, "GET, HEAD")
+		return
+	}
+	if len(parts) == 2 {
+		v, err := h.db.Nearest(r.Context(), id)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"candidates": v})
 		return
 	}
 	item, err := h.db.HistoryItem(r.Context(), id)
@@ -528,6 +657,18 @@ type difference struct {
 	RecordedExists  bool   `json:"recorded_exists"`
 	RequestDisplay  string `json:"request_display"`
 	RecordedDisplay string `json:"recorded_display"`
+	// Excluded marks a path under one of the collection's match exclusions:
+	// the difference did not affect matching.
+	Excluded bool `json:"excluded"`
+}
+
+// markExcluded flags the differences that the collection's exclusions hide
+// from matching.
+func markExcluded(d []difference, exclusions []string) []difference {
+	for i := range d {
+		d[i].Excluded = match.Excluded(d[i].Path, exclusions)
+	}
+	return d
 }
 
 func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
@@ -552,6 +693,11 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	collection, err := h.db.Collection(r.Context(), e.Recording.CollectionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	if in.HistoryID != 0 {
 		history, historyErr := h.db.HistoryItem(r.Context(), in.HistoryID)
 		if historyErr != nil {
@@ -571,7 +717,7 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			diffJSON("", a, b, &d)
-			writeJSON(w, 200, map[string]any{"differences": d})
+			writeJSON(w, 200, map[string]any{"differences": markExcluded(d, collection.Exclusions)})
 			return
 		}
 	}
@@ -586,7 +732,7 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 	}
 	d := make([]difference, 0)
 	diffJSON("", a, b, &d)
-	writeJSON(w, 200, map[string]any{"differences": d})
+	writeJSON(w, 200, map[string]any{"differences": markExcluded(d, collection.Exclusions)})
 }
 
 func diffJSON(path string, a, b any, out *[]difference) {

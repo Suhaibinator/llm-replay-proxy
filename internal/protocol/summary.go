@@ -48,6 +48,7 @@ func SummarizeRequest(route string, body []byte) model.RequestSummary {
 			s.Preview = text
 			if firstUser < 0 {
 				firstUser = i
+				s.Opening = preview(text)
 			}
 		}
 	}
