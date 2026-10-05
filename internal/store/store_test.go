@@ -255,24 +255,12 @@ func TestSettingsValidation(t *testing.T) {
 	}
 }
 
-func TestHistoryTimingMigrationAndAnalytics(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", sqliteFileURL(path))
-	if err != nil {
+func TestHistoryTimingAndAnalytics(t *testing.T) {
+	s := openTest(t)
+	// A row without a source or timings, counted as "legacy" by analytics.
+	if err := s.AddHistory(context.Background(), model.History{CollectionID: 1, Route: "/v1/responses", Key: "old", Request: []byte(`{}`), Outcome: "hit", CreatedAt: "2026-01-01T00:00:00.100Z"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE collections(id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,exclusions TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE settings(singleton INTEGER PRIMARY KEY,mode TEXT NOT NULL,active_collection_id INTEGER NOT NULL,first_event_delay_ms INTEGER NOT NULL,delay_multiplier REAL NOT NULL); CREATE TABLE history(id INTEGER PRIMARY KEY,collection_id INTEGER NOT NULL,route TEXT NOT NULL,key TEXT NOT NULL,request BLOB NOT NULL,outcome TEXT NOT NULL,detail TEXT NOT NULL,recording_id INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL); INSERT INTO collections VALUES(1,'Default','[]','2026-01-01T00:00:00Z'); INSERT INTO settings VALUES(1,'replay',1,0,1); INSERT INTO history(collection_id,route,key,request,outcome,detail,created_at) VALUES(1,'/v1/responses','old','{}','hit','','2026-01-01T00:00:00.100Z')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
 	from := time.Date(2026, 1, 1, 0, 0, 0, 500_000_000, time.UTC)
 	to := from.Add(time.Hour)
 	d0 := int64(10)

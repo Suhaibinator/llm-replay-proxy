@@ -47,10 +47,11 @@ Unexpected server failures are 500 `internal_error` with a generic message; the
 details are logged by the server, not returned.
 
 Snapshot import rejects, with 422 and nothing imported, any snapshot that is
-not a readable replay-proxy SQLite database or that violates store invariants,
-including blank (after trimming) collection names and `created_at` values that
-are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions,
-revision headers, or events are stored as empty values. Request history in a
+not a readable replay-proxy SQLite database in the current storage format or
+that violates store invariants, including a request whose stored chunks do not
+reassemble to its recorded hash, blank (after trimming) collection names and `created_at` values that
+are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions or
+revision headers are stored as empty values. Request history in a
 snapshot is ignored.
 
 Analytics uses a half-open `[from,to)` interval, defaults to the last 24 hours,
@@ -88,26 +89,9 @@ with no `response.output_text.delta` event to rewrite.
 ## Matching keys
 
 Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
-exclusions also matches as `[]`. Earlier builds canonicalized empty arrays as
-`null` under the same canonical version, so `{"tools":[]}` and
-`{"tools":null}` shared a recording. Opening a database runs a one-time,
-transactional re-key (recorded as `rekey-empty-arrays-1` in `store_migrations`)
-that recomputes every recording's key and every revision's matching input from
-the stored request, route, upstream identity, and collection exclusions:
-
-- A revision whose request now has a different key than its recording's
-  active request moves to the recording for that key; if none exists, one is
-  created with the newest such revision active. Requests that differ only in
-  `[]` versus `null` therefore replay what was recorded for that exact shape.
-- When several recordings now share a key (possible only with array-element
-  exclusions), the one with the newest active revision keeps serving; the
-  others' revisions become its inactive history and the emptied recordings are
-  removed. No revision is deleted. History rows keep their original keys.
-
-Snapshots exported by earlier builds still import: provenance is accepted when
-it matches either the current key or the earlier empty-array-as-`null` key, and
-any collection with earlier keys gets the same re-key inside the import
-transaction. Provenance that matches neither is rejected as before.
+exclusions also matches as `[]`. The key is the SHA-256 of the matching input,
+which is derived from the request, route, upstream identity, and collection
+exclusions whenever it is displayed and is not stored.
 
 Shared Go data types are in `internal/model`. Storage exposes atomic
 `PublishIfActive` and `RestoreIfActive` operations for optimistic editing, while

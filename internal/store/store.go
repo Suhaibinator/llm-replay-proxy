@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -41,6 +40,10 @@ var memorySequence atomic.Uint64
 
 func sqliteFileURL(path string) string { return (&url.URL{Scheme: "file", Path: path}).String() }
 
+// schemaVersion is stored in PRAGMA user_version. A database or snapshot in
+// any other format is refused rather than migrated.
+const schemaVersion = 2
+
 const schema = `
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS collections (
@@ -51,20 +54,25 @@ CREATE TABLE IF NOT EXISTS settings (
  active_collection_id INTEGER NOT NULL REFERENCES collections(id),
  first_event_delay_ms INTEGER NOT NULL, delay_multiplier REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chunks (
+ id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, codec INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bodies (
+ id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, size INTEGER NOT NULL, chunks BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS recordings (
  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
- key TEXT NOT NULL, route TEXT NOT NULL, request BLOB NOT NULL, matching_input BLOB NOT NULL,
- upstream_identity TEXT NOT NULL, streaming INTEGER NOT NULL, active_revision_id INTEGER,
- created_at TEXT NOT NULL, UNIQUE(collection_id,key)
+ key TEXT NOT NULL, route TEXT NOT NULL, upstream_identity TEXT NOT NULL, streaming INTEGER NOT NULL,
+ active_revision_id INTEGER, created_at TEXT NOT NULL, UNIQUE(collection_id,key)
 );
 CREATE TABLE IF NOT EXISTS revisions (
  id INTEGER PRIMARY KEY, recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
- status INTEGER NOT NULL, headers TEXT NOT NULL, body TEXT NOT NULL, events TEXT NOT NULL,
- request BLOB NOT NULL, matching_input BLOB NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL
+ status INTEGER NOT NULL, headers TEXT NOT NULL, body TEXT NOT NULL, events BLOB NOT NULL,
+ request_body INTEGER NOT NULL REFERENCES bodies(id), source TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS history (
  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
- route TEXT NOT NULL, key TEXT NOT NULL, request BLOB NOT NULL, outcome TEXT NOT NULL,
+ route TEXT NOT NULL, key TEXT NOT NULL, request_body INTEGER REFERENCES bodies(id), outcome TEXT NOT NULL,
  detail TEXT NOT NULL, recording_id INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
  source TEXT NOT NULL DEFAULT '', duration_ms INTEGER, first_event_ms INTEGER,
  lookup_outcome TEXT NOT NULL DEFAULT ''
@@ -97,54 +105,33 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, path: path}
-	if _, err = db.Exec(schema); err != nil {
+	if err = s.initSchema(context.Background()); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("initialize database: %w", err)
-	}
-	if err = s.ensureHistoryColumns(context.Background()); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate database: %w", err)
+		return nil, err
 	}
 	if err = s.ensureDefaults(context.Background()); err != nil {
 		db.Close()
 		return nil, err
 	}
-	if err = s.migrateMatchingKeys(context.Background()); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate matching keys: %w", err)
-	}
 	return s, nil
 }
 
-func (s *Store) ensureHistoryColumns(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info(history)")
-	if err != nil {
-		return err
+func (s *Store) initSchema(ctx context.Context) error {
+	var version, tables int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read database version: %w", err)
 	}
-	seen := map[string]bool{}
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, typ string
-		var def any
-		if err := rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		seen[name] = true
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table'").Scan(&tables); err != nil {
+		return fmt.Errorf("read database version: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
+	if tables > 0 && version != schemaVersion {
+		return fmt.Errorf("database %s uses storage format %d; this build needs format %d and does not migrate. Delete the file to start fresh", s.path, version, schemaVersion)
 	}
-	if err := rows.Close(); err != nil {
-		return err
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
 	}
-	for _, x := range []struct{ name, sql string }{{"source", "ALTER TABLE history ADD COLUMN source TEXT NOT NULL DEFAULT ''"}, {"duration_ms", "ALTER TABLE history ADD COLUMN duration_ms INTEGER"}, {"first_event_ms", "ALTER TABLE history ADD COLUMN first_event_ms INTEGER"}, {"lookup_outcome", "ALTER TABLE history ADD COLUMN lookup_outcome TEXT NOT NULL DEFAULT ''"}} {
-		if !seen[x.name] {
-			if _, err := s.db.ExecContext(ctx, x.sql); err != nil {
-				return err
-			}
-		}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
 	}
 	return nil
 }
@@ -276,13 +263,13 @@ func (s *Store) SetSettings(ctx context.Context, v model.Settings) error {
 	return nil
 }
 
-const recordingCols = "id,collection_id,key,route,request,matching_input,upstream_identity,streaming,active_revision_id,created_at"
+const recordingCols = "id,collection_id,key,route,upstream_identity,streaming,active_revision_id,created_at"
 
 func scanRecording(row interface{ Scan(...any) error }) (model.Recording, error) {
 	var r model.Recording
 	var stream int
 	var active sql.NullInt64
-	err := row.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &r.Request, &r.MatchingInput, &r.UpstreamIdentity, &stream, &active, &r.CreatedAt)
+	err := row.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &r.UpstreamIdentity, &stream, &active, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}
@@ -292,24 +279,30 @@ func scanRecording(row interface{ Scan(...any) error }) (model.Recording, error)
 	}
 	return r, err
 }
-func scanRevision(row interface{ Scan(...any) error }) (model.Revision, error) {
-	var r model.Revision
-	var h, e string
-	err := row.Scan(&r.ID, &r.RecordingID, &r.Status, &h, &r.Body, &e, &r.Request, &r.MatchingInput, &r.Source, &r.CreatedAt)
+
+const revisionCols = "id,recording_id,status,headers,body,events,request_body,source,created_at"
+
+// scanRevision reads a revision without its request; bodyID names the stored
+// request for callers that need it.
+func scanRevision(row interface{ Scan(...any) error }) (r model.Revision, bodyID sql.NullInt64, err error) {
+	var h string
+	var e []byte
+	err = row.Scan(&r.ID, &r.RecordingID, &r.Status, &h, &r.Body, &e, &bodyID, &r.Source, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return r, ErrNotFound
+		return r, bodyID, ErrNotFound
 	}
 	if err != nil {
-		return r, err
+		return r, bodyID, err
 	}
 	if err = json.Unmarshal([]byte(h), &r.Headers); err != nil {
-		return r, err
+		return r, bodyID, err
 	}
-	if err = json.Unmarshal([]byte(e), &r.Events); err != nil {
-		return r, err
-	}
-	return r, nil
+	r.Events, err = decodeEvents(e)
+	return r, bodyID, err
 }
+
+// Lookup serves the replay hot path: it reads the response but never the
+// request, which can be megabytes and is not needed to replay.
 func (s *Store) Lookup(ctx context.Context, cid int64, key string) (model.Entry, error) {
 	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? AND key=?", cid, key))
 	if err != nil {
@@ -318,7 +311,7 @@ func (s *Store) Lookup(ctx context.Context, cid int64, key string) (model.Entry,
 	if r.ActiveRevisionID == 0 {
 		return model.Entry{}, ErrNotFound
 	}
-	v, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE id=?", r.ActiveRevisionID))
+	v, _, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE id=?", r.ActiveRevisionID))
 	return model.Entry{Recording: r, Revision: v}, err
 }
 
@@ -332,12 +325,15 @@ func (s *Store) PublishIfActive(ctx context.Context, rec model.Recording, rev mo
 	return s.publish(ctx, rec, rev, &expectedRevisionID)
 }
 
+// publish stores rev as the active revision of rec's key. The recording's
+// request is always its active revision's request; MatchingInput is derived
+// from it and, when a caller supplies one, must agree.
 func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revision, expectedRevisionID *int64) (model.Entry, error) {
 	if rec.CollectionID == 0 || rec.Key == "" || rec.Route == "" {
 		return model.Entry{}, errors.New("recording collection, key, and route are required")
 	}
-	if !json.Valid(rec.Request) || !json.Valid(rec.MatchingInput) {
-		return model.Entry{}, errors.New("request and matching input must be valid JSON")
+	if !json.Valid(rec.Request) {
+		return model.Entry{}, errors.New("request must be valid JSON")
 	}
 	collection, err := s.Collection(ctx, rec.CollectionID)
 	if err != nil {
@@ -347,7 +343,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if err != nil {
 		return model.Entry{}, err
 	}
-	if key != rec.Key || string(input) != string(rec.MatchingInput) {
+	if key != rec.Key || (len(rec.MatchingInput) > 0 && string(input) != string(rec.MatchingInput)) {
 		return model.Entry{}, errors.New("recording key or matching input does not match request")
 	}
 	if requestStreaming(rec.Request) != rec.Streaming {
@@ -362,11 +358,15 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if len(rev.Request) == 0 {
 		rev.Request = append(json.RawMessage(nil), rec.Request...)
 	}
-	if len(rev.MatchingInput) == 0 {
-		rev.MatchingInput = append(json.RawMessage(nil), rec.MatchingInput...)
+	// Canonicalizing a multi-megabyte request is the costliest validation step;
+	// skip the second pass when the revision carries the same bytes.
+	vkey, vinput := key, input
+	if !bytes.Equal(rev.Request, rec.Request) {
+		if vkey, vinput, err = matching.Key(rec.Route, rec.UpstreamIdentity, rev.Request, collection.Exclusions); err != nil {
+			return model.Entry{}, errors.New("revision provenance does not match recording key")
+		}
 	}
-	vkey, vinput, err := matching.Key(rec.Route, rec.UpstreamIdentity, rev.Request, collection.Exclusions)
-	if err != nil || vkey != rec.Key || string(vinput) != string(rev.MatchingInput) {
+	if vkey != rec.Key || (len(rev.MatchingInput) > 0 && string(vinput) != string(rev.MatchingInput)) {
 		return model.Entry{}, errors.New("revision provenance does not match recording key")
 	}
 	if requestStreaming(rev.Request) != rec.Streaming {
@@ -382,7 +382,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if err != nil {
 		return model.Entry{}, err
 	}
-	ej, err := encode(rev.Events)
+	ej, err := encodeEvents(rev.Events)
 	if err != nil {
 		return model.Entry{}, err
 	}
@@ -391,21 +391,17 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 		return model.Entry{}, err
 	}
 	defer tx.Rollback()
-	incomingRequest := append(json.RawMessage(nil), rec.Request...)
-	incomingMatching := append(json.RawMessage(nil), rec.MatchingInput...)
-	var existing model.Recording
-	existing, err = scanRecording(tx.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? AND key=?", rec.CollectionID, rec.Key))
+	existing, err := scanRecording(tx.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? AND key=?", rec.CollectionID, rec.Key))
 	if errors.Is(err, ErrNotFound) {
 		if expectedRevisionID != nil && *expectedRevisionID != 0 {
 			return model.Entry{}, ErrConflict
 		}
 		rec.CreatedAt = now()
-		res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,request,matching_input,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, []byte(rec.Request), []byte(rec.MatchingInput), rec.UpstreamIdentity, rec.Streaming, rec.CreatedAt)
+		res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, rec.UpstreamIdentity, rec.Streaming, rec.CreatedAt)
 		if e != nil {
 			return model.Entry{}, e
 		}
-		rec.ID, e = res.LastInsertId()
-		if e != nil {
+		if rec.ID, e = res.LastInsertId(); e != nil {
 			return model.Entry{}, e
 		}
 	} else if err != nil {
@@ -415,57 +411,95 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 			return model.Entry{}, ErrConflict
 		}
 		rec = existing
-		if rev.Source == "recorded" {
-			rec.Request, rec.MatchingInput = incomingRequest, incomingMatching
-		}
 	}
-	if len(rev.Request) == 0 {
-		rev.Request = append(json.RawMessage(nil), rec.Request...)
-	}
-	if len(rev.MatchingInput) == 0 {
-		rev.MatchingInput = append(json.RawMessage(nil), rec.MatchingInput...)
-	}
-	if !json.Valid(rev.Request) || !json.Valid(rev.MatchingInput) {
-		return model.Entry{}, errors.New("revision request provenance must be valid JSON")
+	bodyID, err := internBody(ctx, tx, rev.Request)
+	if err != nil {
+		return model.Entry{}, err
 	}
 	rev.RecordingID = rec.ID
 	rev.CreatedAt = now()
-	res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request,matching_input,source,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, rev.Body, ej, []byte(rev.Request), []byte(rev.MatchingInput), rev.Source, rev.CreatedAt)
+	res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, rev.Body, ej, bodyID, rev.Source, rev.CreatedAt)
 	if err != nil {
 		return model.Entry{}, err
 	}
-	rev.ID, err = res.LastInsertId()
-	if err != nil {
+	if rev.ID, err = res.LastInsertId(); err != nil {
 		return model.Entry{}, err
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE recordings SET active_revision_id=?,request=?,matching_input=? WHERE id=?", rev.ID, []byte(rev.Request), []byte(rev.MatchingInput), rec.ID)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE recordings SET active_revision_id=? WHERE id=?", rev.ID, rec.ID); err != nil {
 		return model.Entry{}, err
 	}
-	rec.ActiveRevisionID = rev.ID
-	rec.Request, rec.MatchingInput = append(json.RawMessage(nil), rev.Request...), append(json.RawMessage(nil), rev.MatchingInput...)
 	if err = tx.Commit(); err != nil {
 		return model.Entry{}, err
 	}
+	rev.MatchingInput = vinput
+	rec.ActiveRevisionID = rev.ID
+	rec.Request, rec.MatchingInput = append(json.RawMessage(nil), rev.Request...), vinput
 	return model.Entry{Recording: rec, Revision: rev}, nil
 }
 
+// Recordings lists a collection with each recording's request (searchable in
+// the console) but without matching input, which is derived on Get.
 func (s *Store) Recordings(ctx context.Context, cid int64) ([]model.Recording, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? ORDER BY id DESC", cid)
+	rows, err := s.db.QueryContext(ctx, "SELECT r.id,r.collection_id,r.key,r.route,r.upstream_identity,r.streaming,r.active_revision_id,r.created_at,v.request_body FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.collection_id=? ORDER BY r.id DESC", cid)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []model.Recording{}
+	var bodies []sql.NullInt64
 	for rows.Next() {
-		r, e := scanRecording(rows)
-		if e != nil {
-			return nil, e
+		var r model.Recording
+		var stream int
+		var active, body sql.NullInt64
+		if err = rows.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &r.UpstreamIdentity, &stream, &active, &r.CreatedAt, &body); err != nil {
+			rows.Close()
+			return nil, err
 		}
+		r.Streaming, r.ActiveRevisionID = stream != 0, active.Int64
 		out = append(out, r)
+		bodies = append(bodies, body)
 	}
-	return out, rows.Err()
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	cache := bodyCache{}
+	for i := range out {
+		if !bodies[i].Valid {
+			continue // no active revision
+		}
+		if out[i].Request, err = cache.load(ctx, s.db, bodies[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
+
+// derived recomputes matching input for display; it is never stored.
+type derived struct {
+	route, identity string
+	exclusions      []string
+	inputs          map[string]json.RawMessage
+}
+
+func (s *Store) derivation(ctx context.Context, r model.Recording) (*derived, error) {
+	c, err := s.Collection(ctx, r.CollectionID)
+	if err != nil {
+		return nil, err
+	}
+	return &derived{route: r.Route, identity: r.UpstreamIdentity, exclusions: c.Exclusions, inputs: map[string]json.RawMessage{}}, nil
+}
+
+func (d *derived) input(request json.RawMessage) (json.RawMessage, error) {
+	if in, ok := d.inputs[string(request)]; ok {
+		return in, nil
+	}
+	_, in, err := matching.Key(d.route, d.identity, request, d.exclusions)
+	if err != nil {
+		return nil, err
+	}
+	d.inputs[string(request)] = in
+	return in, nil
+}
+
 func (s *Store) Get(ctx context.Context, id int64) (model.Entry, error) {
 	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", id))
 	if err != nil {
@@ -474,24 +508,64 @@ func (s *Store) Get(ctx context.Context, id int64) (model.Entry, error) {
 	if r.ActiveRevisionID == 0 {
 		return model.Entry{}, ErrNotFound
 	}
-	v, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE id=?", r.ActiveRevisionID))
-	return model.Entry{Recording: r, Revision: v}, err
+	v, bodyID, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE id=?", r.ActiveRevisionID))
+	if err != nil {
+		return model.Entry{}, err
+	}
+	if v.Request, err = loadBody(ctx, s.db, bodyID.Int64); err != nil {
+		return model.Entry{}, err
+	}
+	d, err := s.derivation(ctx, r)
+	if err != nil {
+		return model.Entry{}, err
+	}
+	if v.MatchingInput, err = d.input(v.Request); err != nil {
+		return model.Entry{}, err
+	}
+	r.Request, r.MatchingInput = v.Request, v.MatchingInput
+	return model.Entry{Recording: r, Revision: v}, nil
 }
+
 func (s *Store) Revisions(ctx context.Context, rid int64) ([]model.Revision, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
+	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", rid))
+	if errors.Is(err, ErrNotFound) {
+		return []model.Revision{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	rows, err := s.db.QueryContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
+	if err != nil {
+		return nil, err
+	}
 	out := []model.Revision{}
+	var bodies []sql.NullInt64
 	for rows.Next() {
-		r, e := scanRevision(rows)
+		v, body, e := scanRevision(rows)
 		if e != nil {
+			rows.Close()
 			return nil, e
 		}
-		out = append(out, r)
+		out = append(out, v)
+		bodies = append(bodies, body)
 	}
-	return out, rows.Err()
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	d, err := s.derivation(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	cache := bodyCache{}
+	for i := range out {
+		if out[i].Request, err = cache.load(ctx, s.db, bodies[i]); err != nil {
+			return nil, err
+		}
+		if out[i].MatchingInput, err = d.input(out[i].Request); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 func (s *Store) Restore(ctx context.Context, rid, vid int64) (model.Entry, error) {
 	return s.restore(ctx, rid, vid, nil)
@@ -501,8 +575,8 @@ func (s *Store) RestoreIfActive(ctx context.Context, rid, vid, expectedActiveID 
 	return s.restore(ctx, rid, vid, &expectedActiveID)
 }
 func (s *Store) restore(ctx context.Context, rid, vid int64, expectedActiveID *int64) (model.Entry, error) {
-	query := `UPDATE recordings SET active_revision_id=?,request=(SELECT request FROM revisions WHERE id=?),matching_input=(SELECT matching_input FROM revisions WHERE id=?) WHERE id=? AND EXISTS(SELECT 1 FROM revisions WHERE id=? AND recording_id=?)`
-	args := []any{vid, vid, vid, rid, vid, rid}
+	query := `UPDATE recordings SET active_revision_id=? WHERE id=? AND EXISTS(SELECT 1 FROM revisions WHERE id=? AND recording_id=?)`
+	args := []any{vid, rid, vid, rid}
 	if expectedActiveID != nil {
 		query += " AND active_revision_id=?"
 		args = append(args, *expectedActiveID)
@@ -524,16 +598,37 @@ func (s *Store) restore(ctx context.Context, rid, vid int64, expectedActiveID *i
 	return s.Get(ctx, rid)
 }
 
+// AddHistory logs one proxied call. A request seen before (every replay hit of
+// a recorded request) adds only the row; its body is already stored.
 func (s *Store) AddHistory(ctx context.Context, h model.History) error {
 	if h.CreatedAt == "" {
 		h.CreatedAt = now()
 	}
-	if h.Request == nil {
-		h.Request = json.RawMessage(`null`)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, []byte(h.Request), h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus)
-	return err
+	defer tx.Rollback()
+	var body sql.NullInt64
+	if len(h.Request) > 0 && string(h.Request) != "null" {
+		if body.Int64, err = internBody(ctx, tx, h.Request); err != nil {
+			return err
+		}
+		body.Valid = true
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, body, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
+
+const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome"
+
+func scanHistory(row interface{ Scan(...any) error }) (h model.History, body sql.NullInt64, err error) {
+	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus)
+	return
+}
+
 func (s *Store) History(ctx context.Context, cid int64, limit int) ([]model.History, error) {
 	if limit <= 0 {
 		limit = 100
@@ -541,28 +636,42 @@ func (s *Store) History(ctx context.Context, cid int64, limit int) ([]model.Hist
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,collection_id,route,key,request,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome FROM history WHERE collection_id=? ORDER BY id DESC LIMIT ?", cid, limit)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+historyCols+" FROM history WHERE collection_id=? ORDER BY id DESC LIMIT ?", cid, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []model.History{}
+	var bodies []sql.NullInt64
 	for rows.Next() {
-		var h model.History
-		if err := rows.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &h.Request, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus); err != nil {
-			return nil, err
+		h, body, e := scanHistory(rows)
+		if e != nil {
+			rows.Close()
+			return nil, e
 		}
 		out = append(out, h)
+		bodies = append(bodies, body)
 	}
-	return out, rows.Err()
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	cache := bodyCache{}
+	for i := range out {
+		if out[i].Request, err = cache.load(ctx, s.db, bodies[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) HistoryItem(ctx context.Context, id int64) (model.History, error) {
-	var h model.History
-	err := s.db.QueryRowContext(ctx, "SELECT id,collection_id,route,key,request,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome FROM history WHERE id=?", id).Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &h.Request, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus)
+	h, body, err := scanHistory(s.db.QueryRowContext(ctx, "SELECT "+historyCols+" FROM history WHERE id=?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return h, ErrNotFound
 	}
+	if err != nil {
+		return h, err
+	}
+	h.Request, err = bodyCache{}.load(ctx, s.db, body)
 	return h, err
 }
 
@@ -784,15 +893,15 @@ func (s *Store) HasProviderState(ctx context.Context, cid int64, stateID string)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var body, events string
+		var body string
+		var events []byte
 		if err := rows.Scan(&body, &events); err != nil {
 			return false, err
 		}
 		if rawContainsState(body, stateID) {
 			return true, nil
 		}
-		var es []model.Event
-		if json.Unmarshal([]byte(events), &es) == nil {
+		if es, err := decodeEvents(events); err == nil {
 			for _, e := range es {
 				if rawContainsState(eventJSON(e.Data), stateID) {
 					return true, nil
@@ -855,6 +964,11 @@ func (s *Store) Export(ctx context.Context, collectionID int64, destPath string)
 	if _, err = tx.ExecContext(ctx, "DELETE FROM history"); err != nil {
 		return err
 	}
+	// Bodies are shared, so deleting rows leaves their bytes behind. Sweep
+	// them, or history-only requests and other collections would ship.
+	if err = sweepBodies(ctx, tx); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
@@ -883,21 +997,6 @@ func uniqueImportedName(ctx context.Context, tx *sql.Tx, name string) (string, e
 type importedRecording struct {
 	r         model.Recording
 	revisions []model.Revision
-	// legacyKeys marks provenance computed by builds that keyed [] as null; the
-	// imported collection is re-keyed before commit.
-	legacyKeys bool
-}
-
-// snapshotKeyMatches reports whether stored provenance is what the request
-// produces now, or what pre-empty-array-fix builds produced (legacy).
-func snapshotKeyMatches(route, identity string, request []byte, exclusions []string, storedKey string, storedInput []byte) (ok, legacy bool) {
-	if k, in, err := matching.Key(route, identity, request, exclusions); err == nil && k == storedKey && bytes.Equal(in, storedInput) {
-		return true, false
-	}
-	if k, in, err := matching.LegacyKey(route, identity, request, exclusions); err == nil && k == storedKey && bytes.Equal(in, storedInput) {
-		return true, true
-	}
-	return false, false
 }
 
 type importedCollection struct {
@@ -918,8 +1017,8 @@ func validTimestamp(v string) bool {
 // never imported.
 //
 // Every failure caused by the snapshot's contents wraps ErrInvalidSnapshot.
-// Collection names are trimmed and must not be blank; null exclusions, revision
-// headers and events are normalised to empty values exactly as publication does;
+// Collection names are trimmed and must not be blank; null exclusions and
+// revision headers are normalised to empty values exactly as publication does;
 // created_at values that are not RFC 3339 timestamps reject the snapshot rather
 // than being silently replaced.
 func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collection, error) {
@@ -978,7 +1077,7 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 		out = append(out, item.c)
 		for _, loaded := range item.recordings {
 			r := loaded.r
-			res, e = tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,request,matching_input,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?,?,?)`, newCID, r.Key, r.Route, []byte(r.Request), []byte(r.MatchingInput), r.UpstreamIdentity, r.Streaming, r.CreatedAt)
+			res, e = tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?)`, newCID, r.Key, r.Route, r.UpstreamIdentity, r.Streaming, r.CreatedAt)
 			if e != nil {
 				return nil, e
 			}
@@ -992,11 +1091,15 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 				if e != nil {
 					return nil, e
 				}
-				ej, e := encode(v.Events)
+				ej, e := encodeEvents(v.Events)
 				if e != nil {
 					return nil, e
 				}
-				res, e = tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request,matching_input,source,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, newRID, v.Status, hj, v.Body, ej, []byte(v.Request), []byte(v.MatchingInput), v.Source, v.CreatedAt)
+				bodyID, e := internBody(ctx, tx, v.Request)
+				if e != nil {
+					return nil, e
+				}
+				res, e = tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, newRID, v.Status, hj, v.Body, ej, bodyID, v.Source, v.CreatedAt)
 				if e != nil {
 					return nil, e
 				}
@@ -1012,11 +1115,6 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 				return nil, e
 			}
 		}
-		if slices.ContainsFunc(item.recordings, func(r importedRecording) bool { return r.legacyKeys }) {
-			if _, e = rekeyCollection(ctx, tx, newCID, item.c.Exclusions); e != nil {
-				return nil, fmt.Errorf("re-key imported collection: %w", e)
-			}
-		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
@@ -1028,6 +1126,13 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 // describes the snapshot (including read failures of the uploaded file), so the
 // caller classifies all of them as ErrInvalidSnapshot.
 func readSnapshot(ctx context.Context, src *sql.DB) ([]importedCollection, error) {
+	var version int
+	if err := src.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return nil, err
+	}
+	if version != schemaVersion {
+		return nil, fmt.Errorf("snapshot uses storage format %d; this build reads format %d", version, schemaVersion)
+	}
 	var integrity string
 	if err := src.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
 		return nil, err
@@ -1045,8 +1150,9 @@ func readSnapshot(ctx context.Context, src *sql.DB) ([]importedCollection, error
 	if len(imports) == 0 {
 		return nil, errors.New("snapshot contains no collections")
 	}
+	bodies := bodyCache{}
 	for i := range imports {
-		if imports[i].recordings, err = readSnapshotRecordings(ctx, src, imports[i].oldID, imports[i].c.Exclusions); err != nil {
+		if imports[i].recordings, err = readSnapshotRecordings(ctx, src, imports[i].oldID, imports[i].c.Exclusions, bodies); err != nil {
 			return nil, err
 		}
 	}
@@ -1105,7 +1211,7 @@ func readSnapshotCollections(ctx context.Context, src *sql.DB) ([]importedCollec
 	return imports, rows.Close()
 }
 
-func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64, exclusions []string) ([]importedRecording, error) {
+func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64, exclusions []string, bodies bodyCache) ([]importedRecording, error) {
 	rows, err := src.QueryContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? ORDER BY id", collectionID)
 	if err != nil {
 		return nil, fmt.Errorf("recordings: %w", err)
@@ -1123,17 +1229,7 @@ func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64
 		if !validTimestamp(r.CreatedAt) {
 			return nil, errors.New("recording has an invalid created_at")
 		}
-		if !json.Valid(r.Request) || !json.Valid(r.MatchingInput) {
-			return nil, errors.New("snapshot contains invalid recording JSON")
-		}
-		matches, legacy := snapshotKeyMatches(r.Route, r.UpstreamIdentity, r.Request, exclusions, r.Key, r.MatchingInput)
-		if !matches {
-			return nil, errors.New("recording key or matching input does not match request")
-		}
-		if requestStreaming(r.Request) != r.Streaming {
-			return nil, errors.New("recording streaming flag disagrees with request")
-		}
-		out = append(out, importedRecording{r: r, legacyKeys: legacy})
+		out = append(out, importedRecording{r: r})
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("read recordings: %w", err)
@@ -1144,28 +1240,41 @@ func readSnapshotRecordings(ctx context.Context, src *sql.DB, collectionID int64
 	// Revisions are read after the recordings cursor is closed, so a source read
 	// error in either query surfaces instead of silently shortening the import.
 	for i := range out {
-		var legacy bool
-		if out[i].revisions, legacy, err = readSnapshotRevisions(ctx, src, out[i].r, exclusions); err != nil {
+		if out[i].revisions, err = readSnapshotRevisions(ctx, src, &out[i].r, exclusions, bodies); err != nil {
 			return nil, err
 		}
-		out[i].legacyKeys = out[i].legacyKeys || legacy
 	}
 	return out, nil
 }
 
-func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, exclusions []string) (_ []model.Revision, legacyKeys bool, _ error) {
-	rows, err := src.QueryContext(ctx, "SELECT id,recording_id,status,headers,body,events,request,matching_input,source,created_at FROM revisions WHERE recording_id=? ORDER BY id", r.ID)
+// readSnapshotRevisions loads r's revisions, verifying each request against its
+// stored hash and against r's key, and sets r.Request to the active request.
+func readSnapshotRevisions(ctx context.Context, src *sql.DB, r *model.Recording, exclusions []string, bodies bodyCache) ([]model.Revision, error) {
+	rows, err := src.QueryContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? ORDER BY id", r.ID)
 	if err != nil {
-		return nil, false, fmt.Errorf("revisions: %w", err)
+		return nil, fmt.Errorf("revisions: %w", err)
 	}
 	defer rows.Close()
 	var out []model.Revision
-	var active *model.Revision
+	var bodyIDs []sql.NullInt64
 	for rows.Next() {
-		v, err := scanRevision(rows)
+		v, body, err := scanRevision(rows)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
+		out = append(out, v)
+		bodyIDs = append(bodyIDs, body)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("read revisions: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	keys := map[int64]string{}
+	active := false
+	for i := range out {
+		v := &out[i]
 		// Match publication: a JSON null is the empty value, never stored as null.
 		if v.Headers == nil {
 			v.Headers = map[string]string{}
@@ -1174,36 +1283,36 @@ func readSnapshotRevisions(ctx context.Context, src *sql.DB, r model.Recording, 
 			v.Events = []model.Event{}
 		}
 		if !validTimestamp(v.CreatedAt) {
-			return nil, false, errors.New("revision has an invalid created_at")
+			return nil, errors.New("revision has an invalid created_at")
 		}
-		matches, legacy := snapshotKeyMatches(r.Route, r.UpstreamIdentity, v.Request, exclusions, r.Key, v.MatchingInput)
-		if !matches {
-			return nil, false, errors.New("revision provenance does not match recording key")
+		if v.Request, err = bodies.load(ctx, src, bodyIDs[i]); err != nil {
+			return nil, err
 		}
-		legacyKeys = legacyKeys || legacy
+		key, seen := keys[bodyIDs[i].Int64]
+		if !seen {
+			if key, _, err = matching.Key(r.Route, r.UpstreamIdentity, v.Request, exclusions); err != nil {
+				return nil, fmt.Errorf("revision request: %w", err)
+			}
+			keys[bodyIDs[i].Int64] = key
+		}
+		if key != r.Key {
+			return nil, errors.New("revision provenance does not match recording key")
+		}
 		if requestStreaming(v.Request) != r.Streaming {
-			return nil, false, errors.New("revision streaming flag disagrees with request")
+			return nil, errors.New("revision streaming flag disagrees with request")
 		}
 		if err = validateImportedHeaders(v.Headers); err != nil {
-			return nil, false, err
+			return nil, err
 		}
-		if err = protocol.Validate(r.Route, r.Streaming, v); err != nil {
-			return nil, false, fmt.Errorf("invalid revision: %w", err)
+		if err = protocol.Validate(r.Route, r.Streaming, *v); err != nil {
+			return nil, fmt.Errorf("invalid revision: %w", err)
 		}
-		out = append(out, v)
 		if v.ID == r.ActiveRevisionID {
-			copy := v
-			active = &copy
+			r.Request, active = v.Request, true
 		}
 	}
-	if err = rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("read revisions: %w", err)
+	if !active {
+		return nil, errors.New("recording references missing active revision")
 	}
-	if active == nil {
-		return nil, false, errors.New("recording references missing active revision")
-	}
-	if string(active.Request) != string(r.Request) || string(active.MatchingInput) != string(r.MatchingInput) {
-		return nil, false, errors.New("recording provenance disagrees with active revision")
-	}
-	return out, legacyKeys, rows.Close()
+	return out, nil
 }
