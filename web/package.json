@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test lib/response-viewer.test.mjs lib/request-viewer.test.mjs lib/fences.test.mjs lib/traffic.test.mjs lib/recordings.test.mjs"
+    "test": "node --experimental-strip-types --test 'lib/*.test.mjs'"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
