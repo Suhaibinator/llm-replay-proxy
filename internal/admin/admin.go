@@ -61,6 +61,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.collectionAction(w, r, p)
 	case strings.HasPrefix(p, "/api/recordings/"):
 		h.recordingAction(w, r, p)
+	case strings.HasPrefix(p, "/api/history/"):
+		h.historyItem(w, r, p)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 	}
@@ -139,6 +141,10 @@ func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_settings", fmt.Sprintf("delay_multiplier must be between 0 and %d", maxDelayMultiplier))
 			return
 		}
+		if v.HistoryLimit < 0 || v.HistoryLimit > store.MaxHistoryLimit {
+			writeError(w, http.StatusBadRequest, "invalid_settings", fmt.Sprintf("history_limit must be between 0 and %d", store.MaxHistoryLimit))
+			return
+		}
 		if _, err := h.db.Collection(r.Context(), v.ActiveCollectionID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				writeError(w, 400, "invalid_settings", "active_collection_id does not identify a collection")
@@ -212,8 +218,20 @@ func (h *handler) recordings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) history(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		id, ok := queryID(w, r, "collection_id")
+		if !ok {
+			return
+		}
+		if err := h.db.ClearHistory(r.Context(), id); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if !isRead(r) {
-		methodNotAllowed(w, "GET, HEAD")
+		methodNotAllowed(w, "GET, HEAD, DELETE")
 		return
 	}
 	id, ok := queryID(w, r, "collection_id")
@@ -229,20 +247,43 @@ func (h *handler) history(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	v, err := h.db.History(r.Context(), id, limit)
+	var after int64
+	if raw := r.URL.Query().Get("after_id"); raw != "" {
+		n, ok := parseID(raw)
+		if !ok {
+			writeError(w, 400, "invalid_request", "after_id must be a positive integer")
+			return
+		}
+		after = n
+	}
+	v, err := h.db.HistoryAfter(r.Context(), id, after, limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	type historyItem struct {
+	writeJSON(w, http.StatusOK, v)
+}
+
+// historyItem serves one history row with its exact request text.
+func (h *handler) historyItem(w http.ResponseWriter, r *http.Request, p string) {
+	id, ok := parseID(strings.TrimPrefix(p, "/api/history/"))
+	if !ok {
+		writeError(w, 404, "not_found", "endpoint not found")
+		return
+	}
+	if !isRead(r) {
+		methodNotAllowed(w, "GET, HEAD")
+		return
+	}
+	item, err := h.db.HistoryItem(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
 		model.History
 		RequestText string `json:"request_text"`
-	}
-	out := make([]historyItem, len(v))
-	for i, item := range v {
-		out[i] = historyItem{History: item, RequestText: string(item.Request)}
-	}
-	writeJSON(w, http.StatusOK, out)
+	}{item, string(item.Request)})
 }
 
 func (h *handler) recordingAction(w http.ResponseWriter, r *http.Request, p string) {
@@ -256,6 +297,14 @@ func (h *handler) recordingAction(w http.ResponseWriter, r *http.Request, p stri
 		return
 	}
 	if len(parts) == 1 {
+		if r.Method == http.MethodDelete {
+			if err := h.db.DeleteRecording(r.Context(), id); err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		h.inspect(w, r, id)
 		return
 	}
@@ -269,7 +318,7 @@ func (h *handler) recordingAction(w http.ResponseWriter, r *http.Request, p stri
 
 func (h *handler) inspect(w http.ResponseWriter, r *http.Request, id int64) {
 	if !isRead(r) {
-		methodNotAllowed(w, "GET, HEAD")
+		methodNotAllowed(w, "GET, HEAD, DELETE")
 		return
 	}
 	e, err := h.db.Get(r.Context(), id)
@@ -397,8 +446,20 @@ func (h *handler) restore(w http.ResponseWriter, r *http.Request, id int64) {
 func (h *handler) collectionAction(w http.ResponseWriter, r *http.Request, p string) {
 	parts := strings.Split(strings.TrimPrefix(p, "/api/collections/"), "/")
 	id, ok := parseID(parts[0])
-	if !ok || len(parts) != 2 || parts[1] != "export" {
+	if !ok || len(parts) > 2 || (len(parts) == 2 && parts[1] != "export") {
 		writeError(w, 404, "not_found", "endpoint not found")
+		return
+	}
+	if len(parts) == 1 {
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w, "DELETE")
+			return
+		}
+		if err := h.db.DeleteCollection(r.Context(), id); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if !isRead(r) {
@@ -726,6 +787,10 @@ func writeRevisionConflict(w http.ResponseWriter) {
 // writeStoreError maps store sentinels to client errors. Anything else is an
 // internal failure whose text (SQL, file paths) is logged but never returned.
 func writeStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrActiveCollection) {
+		writeError(w, 409, "collection_active", "switch to another collection before deleting this one")
+		return
+	}
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, 409, "conflict", "resource changed or already exists")
 		return

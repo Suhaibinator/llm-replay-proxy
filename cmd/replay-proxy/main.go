@@ -77,6 +77,17 @@ func run() error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer db.Close()
+	// History pruning stops, and is waited for, before the database closes.
+	maintainCtx, stopMaintaining := context.WithCancel(ctx)
+	maintained := make(chan struct{})
+	go func() {
+		defer close(maintained)
+		db.MaintainHistory(maintainCtx, historyMaintenanceInterval)
+	}()
+	defer func() {
+		stopMaintaining()
+		<-maintained
+	}()
 	handler := newHandler(db, c, authority)
 	listener, err := net.Listen("tcp", c.Listen)
 	if err != nil {
@@ -92,8 +103,9 @@ func run() error {
 // contexts are canceled, and how long to wait for handlers after connections
 // are force-closed. Variables so tests can shorten them.
 var (
-	shutdownTimeout = 10 * time.Second
-	handlerDrain    = 5 * time.Second
+	historyMaintenanceInterval = 10 * time.Minute
+	shutdownTimeout            = 10 * time.Second
+	handlerDrain               = 5 * time.Second
 )
 
 // serve runs the HTTP server on listener until ctx is done, then shuts down.
