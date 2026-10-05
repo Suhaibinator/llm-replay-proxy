@@ -42,7 +42,7 @@ func sqliteFileURL(path string) string { return (&url.URL{Scheme: "file", Path: 
 
 // schemaVersion is stored in PRAGMA user_version. A database or snapshot in
 // any other format is refused rather than migrated.
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 PRAGMA foreign_keys=ON;
@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS chunks (
  id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, codec INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bodies (
- id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, size INTEGER NOT NULL, chunks BLOB NOT NULL, summary TEXT
+ id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, size INTEGER NOT NULL, chunks BLOB NOT NULL,
+ summary TEXT, summary_v INTEGER NOT NULL DEFAULT 0, thread TEXT
 );
 CREATE TABLE IF NOT EXISTS recordings (
  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
@@ -68,19 +69,22 @@ CREATE TABLE IF NOT EXISTS recordings (
 CREATE TABLE IF NOT EXISTS revisions (
  id INTEGER PRIMARY KEY, recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
  status INTEGER NOT NULL, headers TEXT NOT NULL, body TEXT NOT NULL, events BLOB NOT NULL,
- request_body INTEGER NOT NULL REFERENCES bodies(id), source TEXT NOT NULL, created_at TEXT NOT NULL
+ request_body INTEGER NOT NULL REFERENCES bodies(id), source TEXT NOT NULL, created_at TEXT NOT NULL,
+ response_summary TEXT, response_summary_v INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS history (
  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
  route TEXT NOT NULL, key TEXT NOT NULL, request_body INTEGER REFERENCES bodies(id), outcome TEXT NOT NULL,
  detail TEXT NOT NULL, recording_id INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
  source TEXT NOT NULL DEFAULT '', duration_ms INTEGER, first_event_ms INTEGER,
- lookup_outcome TEXT NOT NULL DEFAULT ''
+ lookup_outcome TEXT NOT NULL DEFAULT '', revision_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS history_collection_created ON history(collection_id,id DESC);
 CREATE INDEX IF NOT EXISTS revisions_recording ON revisions(recording_id,id DESC);
 CREATE INDEX IF NOT EXISTS history_collection_time ON history(collection_id,created_at);
 CREATE INDEX IF NOT EXISTS history_recording ON history(recording_id) WHERE recording_id<>0;
+CREATE INDEX IF NOT EXISTS history_body ON history(request_body) WHERE request_body IS NOT NULL;
+CREATE INDEX IF NOT EXISTS bodies_thread ON bodies(thread) WHERE thread IS NOT NULL;
 `
 
 func Open(path string) (*Store, error) {
@@ -584,7 +588,8 @@ func (s *Store) AddHistory(ctx context.Context, h model.History) error {
 		}
 		body.Valid = true
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, body, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus); err != nil {
+	revision := sql.NullInt64{Int64: h.RevisionID, Valid: h.RevisionID != 0}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,revision_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, body, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus, revision); err != nil {
 		return err
 	}
 	return tx.Commit()

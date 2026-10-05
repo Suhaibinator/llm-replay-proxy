@@ -168,7 +168,9 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 			first, replayErr := h.replay(w, r, entry, settings)
 			duration := h.clock.Now().Sub(started).Milliseconds()
 			item := model.History{CollectionID: collection.ID, Route: r.URL.Path, Key: key, Request: clone(body), Outcome: "hit", CacheStatus: "hit", RecordingID: entry.Recording.ID, Source: "replay", DurationMS: &duration, FirstEventMS: first}
-			if replayErr != nil {
+			if replayErr == nil {
+				item.RevisionID = entry.Revision.ID
+			} else {
 				item.Detail = replayErr.Error()
 				if clientGone(r.Context(), replayErr) {
 					item.Outcome = "interrupted"
@@ -259,13 +261,13 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, canonical []byte, key string, collectionID int64, upstream Upstream, identity string, streaming bool, cacheMiss bool) {
 	requestStarted := h.clock.Now()
 	var firstEvent *int64
-	history := func(outcome, detail string, recordingID int64) {
+	history := func(outcome, detail string, recordingID, revisionID int64) {
 		duration := h.clock.Now().Sub(requestStarted).Milliseconds()
 		cacheStatus := "bypass"
 		if cacheMiss {
 			cacheStatus = "miss"
 		}
-		h.addHistory(r.Context(), model.History{CollectionID: collectionID, Route: r.URL.Path, Key: key, Request: clone(original), Outcome: outcome, Detail: detail, RecordingID: recordingID, Source: "upstream", CacheStatus: cacheStatus, DurationMS: &duration, FirstEventMS: firstEvent})
+		h.addHistory(r.Context(), model.History{CollectionID: collectionID, Route: r.URL.Path, Key: key, Request: clone(original), Outcome: outcome, Detail: detail, RecordingID: recordingID, RevisionID: revisionID, Source: "upstream", CacheStatus: cacheStatus, DurationMS: &duration, FirstEventMS: firstEvent})
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.URL, bytes.NewReader(original))
 	if err != nil {
@@ -292,17 +294,17 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	resp, err := h.client.Do(req)
 	if err != nil {
 		if clientGone(r.Context(), err) {
-			history("interrupted", err.Error(), 0)
+			history("interrupted", err.Error(), 0, 0)
 			return
 		}
-		history("error", err.Error(), 0)
+		history("error", err.Error(), 0, 0)
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	body, err := decodedBody(resp)
 	if err != nil {
-		history("error", err.Error(), 0)
+		history("error", err.Error(), 0, 0)
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
@@ -415,11 +417,11 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		if clientGone(r.Context(), readErr) {
 			outcome = "interrupted"
 		}
-		history(outcome, strings.Join(details, ": "), 0)
+		history(outcome, strings.Join(details, ": "), 0, 0)
 		return
 	}
 	if err := protocol.Validate(r.URL.Path, streaming, revision); err != nil {
-		history("incomplete", err.Error(), 0)
+		history("incomplete", err.Error(), 0, 0)
 		return
 	}
 	publishCtx := r.Context()
@@ -431,7 +433,7 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		publishCtx, cancel = context.WithTimeout(context.WithoutCancel(r.Context()), streamPublishTimeout)
 		defer cancel()
 	} else if err := r.Context().Err(); err != nil {
-		history("interrupted", err.Error(), 0)
+		history("interrupted", err.Error(), 0, 0)
 		return
 	}
 	recording := model.Recording{CollectionID: collectionID, Key: key, Route: r.URL.Path, Request: clone(original), MatchingInput: clone(canonical), UpstreamIdentity: identity, Streaming: streaming}
@@ -441,14 +443,14 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		if clientGone(publishCtx, err) {
 			outcome = "interrupted"
 		}
-		history(outcome, err.Error(), 0)
+		history(outcome, err.Error(), 0, 0)
 		return
 	}
 	detail := ""
 	if streaming && (hungUpAfterCompletion || r.Context().Err() != nil) {
 		detail = "caller disconnected after the complete stream"
 	}
-	history("recorded", detail, entry.Recording.ID)
+	history("recorded", detail, entry.Recording.ID, entry.Revision.ID)
 }
 
 // streamPublishTimeout bounds publication of a complete stream, which no

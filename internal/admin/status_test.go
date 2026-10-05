@@ -168,6 +168,27 @@ func TestRoutingValidatesPathBeforeMethod(t *testing.T) {
 		{http.MethodGet, "/api/recordings?collection_id=%2B" + cid, 400},
 		{http.MethodGet, "/api/recordings?collection_id=%20" + cid, 400},
 		{http.MethodGet, "/api/recordings/" + rid, 200},
+		{http.MethodGet, "/api/history/abc/nearest", 404},
+		{http.MethodGet, "/api/history/1/nearest/extra", 404},
+		{http.MethodGet, "/api/history/1/closest", 404},
+		{http.MethodPost, "/api/history/1/nearest", 405},
+		{http.MethodGet, "/api/history/999/nearest", 404},
+		{http.MethodPost, "/api/insights?collection_id=" + cid, 405},
+		{http.MethodGet, "/api/insights?collection_id=x", 400},
+		{http.MethodGet, "/api/insights?collection_id=999", 404},
+		{http.MethodGet, "/api/insights?collection_id=" + cid + "&from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z", 400},
+		{http.MethodGet, "/api/insights?collection_id=" + cid + "&from=2024-01-01T00:00:00Z&to=2026-01-01T00:00:00Z", 400},
+		{http.MethodDelete, "/api/threads?collection_id=" + cid, 405},
+		{http.MethodGet, "/api/threads?collection_id=" + cid + "&limit=0", 400},
+		{http.MethodGet, "/api/threads?collection_id=" + cid + "&limit=501", 400},
+		{http.MethodGet, "/api/threads?collection_id=" + cid + "&from=yesterday", 400},
+		{http.MethodGet, "/api/threads?collection_id=999", 404},
+		{http.MethodGet, "/api/threads/not-a-thread", 404},
+		{http.MethodGet, "/api/threads/0123456789ABCDEF?collection_id=" + cid, 404},
+		{http.MethodPost, "/api/threads/0123456789abcdef/extra", 404},
+		{http.MethodPost, "/api/threads/0123456789abcdef", 405},
+		{http.MethodGet, "/api/threads/0123456789abcdef", 400},
+		{http.MethodGet, "/api/threads/0123456789abcdef?collection_id=" + cid, 404},
 	} {
 		w := request(t, h, tc.method, tc.target, nil)
 		if w.Code != tc.status {
@@ -183,6 +204,7 @@ func TestHeadIsAllowedWhereverGetIs(t *testing.T) {
 	for _, target := range []string{
 		"/api/settings", "/api/collections", "/api/recordings?collection_id=" + cid, "/api/recordings/" + rid,
 		"/api/history?collection_id=" + cid, "/api/analytics?collection_id=" + cid, "/api/collections/" + cid + "/export",
+		"/api/insights?collection_id=" + cid, "/api/threads?collection_id=" + cid,
 	} {
 		w := request(t, h, http.MethodHead, target, nil)
 		if w.Code != 200 {
