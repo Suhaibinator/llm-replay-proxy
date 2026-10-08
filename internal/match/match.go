@@ -14,13 +14,31 @@ import (
 	"unicode/utf8"
 )
 
-const canonicalVersion = 1
+const canonicalVersion = 2
+
+// API names the inference API a route speaks. It is the only part of the
+// request outside the body that matching uses: the upstream provider, its URL
+// and its headers are deliberately left out, so a recording replays whichever
+// provider a request selects.
+func API(route string) (string, error) {
+	switch route {
+	case "/v1/chat/completions":
+		return "chat_completions", nil
+	case "/v1/responses":
+		return "responses", nil
+	case "/v1/messages":
+		return "messages", nil
+	default:
+		return "", fmt.Errorf("match: unsupported route %q", route)
+	}
+}
 
 // Key returns the SHA-256 key and the exact, versioned input hashed to produce it.
 // Exclusions affect only the copy used for matching; body is never modified.
-func Key(route, identity string, body []byte, exclusions []string) (string, []byte, error) {
-	if route == "" {
-		return "", nil, errors.New("match: route is required")
+func Key(route string, body []byte, exclusions []string) (string, []byte, error) {
+	api, err := API(route)
+	if err != nil {
+		return "", nil, err
 	}
 	if err := ValidateExclusions(exclusions); err != nil {
 		return "", nil, err
@@ -42,11 +60,10 @@ func Key(route, identity string, body []byte, exclusions []string) (string, []by
 	// A struct fixes the envelope's field order. RawMessage embeds the already
 	// canonical request rather than quoting it.
 	input, err := json.Marshal(struct {
-		Version  int             `json:"version"`
-		Route    string          `json:"route"`
-		Identity string          `json:"identity"`
-		Body     json.RawMessage `json:"body"`
-	}{canonicalVersion, route, identity, canonicalBody})
+		Version int             `json:"version"`
+		API     string          `json:"api"`
+		Body    json.RawMessage `json:"body"`
+	}{canonicalVersion, api, canonicalBody})
 	if err != nil {
 		return "", nil, fmt.Errorf("match: encode matching input: %w", err)
 	}

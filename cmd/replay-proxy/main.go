@@ -158,13 +158,16 @@ func serve(ctx context.Context, stop context.CancelFunc, listener net.Listener, 
 // newHandler wires every route. A nil authority means auth.disabled (only
 // accepted for loopback listeners by config validation).
 func newHandler(db *store.Store, c config.Config, authority *auth.Authority) http.Handler {
-	upstreams := make(map[string]proxy.Upstream, len(c.Upstreams))
-	for route, u := range c.Upstreams {
-		upstreams[route] = proxy.Upstream{URL: u.URL, APIKey: u.APIKey, Identity: u.Identity, Headers: u.Headers}
+	providers := make(map[string]map[string]proxy.Upstream, len(c.Providers))
+	for name, p := range c.Providers {
+		providers[name] = make(map[string]proxy.Upstream, len(p.Upstreams))
+		for route, u := range p.Upstreams {
+			providers[name][route] = proxy.Upstream{URL: u.URL, APIKey: u.APIKey, Headers: u.Headers}
+		}
 	}
 	mux := http.NewServeMux()
-	inference := proxy.New(db, proxy.Config{Upstreams: upstreams})
-	for _, route := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+	inference := proxy.New(db, proxy.Config{Providers: providers, DefaultProvider: c.DefaultProvider})
+	for _, route := range config.Routes {
 		mux.Handle(route, inference)
 	}
 	mux.Handle("/api/", admin.New(db))

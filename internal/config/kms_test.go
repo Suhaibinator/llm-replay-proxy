@@ -35,28 +35,28 @@ func localConfig(t *testing.T, raw string) string {
 }
 func TestKMSConfigSecretsAndOverrides(t *testing.T) {
 	server, factory := kmsFixture(t)
-	server.SetParameter("demo/proxy", "config", `{"listen":"127.0.0.1:9010","database":"remote.sqlite","upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","identity":"remote-provider","api_key_secret":{"key":"provider-key","version":1,"binding_key_env":"TEST_KMS_BINDING"}}}}`)
+	server.SetParameter("demo/proxy", "config", `{"listen":"127.0.0.1:9010","database":"remote.sqlite","default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","headers":{"x-tier":"remote"},"api_key_env":"TEST_RESPONSES_KEY","api_key_secret":{"key":"provider-key","version":1,"binding_key_env":"TEST_KMS_BINDING"}}}}}}`)
 	server.SetSecretVersion("demo/proxy", "provider-key", []byte("kms-secret"), "string", 1)
 	server.SetSecretVersionCredentials("demo/proxy", "provider-key", 1, "binding-secret")
 	t.Setenv("TEST_KMS_BINDING", "binding-secret")
-	path := localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy","config_key":"config"},"upstreams":{"/v1/responses":{"identity":"local-provider"}}}`)
+	path := localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy","config_key":"config"},"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"headers":{"x-tier":"local"}}}}}}`)
 	c, err := load(context.Background(), path, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := c.Upstreams["/v1/responses"]
-	if c.Listen != "127.0.0.1:9010" || c.Database != "remote.sqlite" || u.Identity != "local-provider" || u.URL != "https://provider.example/v1/responses" || u.APIKey != "kms-secret" {
+	u := c.Providers["p"].Upstreams["/v1/responses"]
+	if c.Listen != "127.0.0.1:9010" || c.Database != "remote.sqlite" || u.Headers["x-tier"] != "local" || u.URL != "https://provider.example/v1/responses" || u.APIKey != "kms-secret" {
 		t.Fatalf("configuration fields did not resolve as expected")
 	}
 	// Environment wins without reading a revoked/unavailable secret.
 	server.SetSecretError("demo/proxy", "provider-key", status.Error(codes.PermissionDenied, "not authorized"))
-	t.Setenv("REPLAY_RESPONSES_API_KEY", "env-secret")
+	t.Setenv("TEST_RESPONSES_KEY", "env-secret")
 	t.Setenv("REPLAY_LISTEN", "127.0.0.1:9011")
 	c, err = load(context.Background(), path, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != "127.0.0.1:9011" || c.Upstreams["/v1/responses"].APIKey != "env-secret" {
+	if c.Listen != "127.0.0.1:9011" || c.Providers["p"].Upstreams["/v1/responses"].APIKey != "env-secret" {
 		t.Fatal("environment did not override KMS")
 	}
 }
@@ -90,7 +90,7 @@ func TestLocalConfigNeverConnectsToKMS(t *testing.T) {
 	}
 }
 func TestKMSRejectsBootstrapAndInlineSecretsInParameter(t *testing.T) {
-	for _, raw := range []string{`{"kms":{"endpoint":"replacement"}}`, `{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","api_key":"do-not-store-as-parameter"}}}`, `{"unknown":"secret"}`, `null`} {
+	for _, raw := range []string{`{"kms":{"endpoint":"replacement"}}`, `{"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","api_key":"do-not-store-as-parameter"}}}}}`, `{"unknown":"secret"}`, `null`} {
 		t.Run(raw, func(t *testing.T) {
 			server, factory := kmsFixture(t)
 			server.SetParameter("demo/proxy", "config", raw)
@@ -114,24 +114,24 @@ func TestKMSTransportValidation(t *testing.T) {
 }
 func TestKMSExplicitEmptyCredentialSkipsSecretForReplay(t *testing.T) {
 	_, factory := kmsFixture(t)
-	t.Setenv("REPLAY_RESPONSES_API_KEY", "")
-	c, err := load(context.Background(), localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy"},"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","api_key_secret":{"key":"absent"}}}}`), factory)
+	t.Setenv("TEST_EMPTY_KEY", "")
+	c, err := load(context.Background(), localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy"},"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","api_key_env":"TEST_EMPTY_KEY","api_key_secret":{"key":"absent"}}}}}}`), factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Upstreams["/v1/responses"].APIKey != "" {
+	if c.Providers["p"].Upstreams["/v1/responses"].APIKey != "" {
 		t.Fatal("empty credential override not preserved")
 	}
 }
 
 func TestMergeJSONReplacesSecretReferencesWholesale(t *testing.T) {
-	remote := `{"listen":"127.0.0.1:9010","upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","headers":{"x-a":"remote","x-b":"remote"},"api_key_secret":{"key":"providers/openai","version":3,"binding_key_env":"REMOTE_BINDING"}}}}`
+	remote := `{"listen":"127.0.0.1:9010","default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","headers":{"x-a":"remote","x-b":"remote"},"api_key_secret":{"key":"providers/openai","version":3,"binding_key_env":"REMOTE_BINDING"}}}}}}`
 	for _, tc := range []struct {
 		name, local string
 		want        SecretRef
 	}{
-		{"key only", `{"upstreams":{"/v1/responses":{"api_key_secret":{"key":"other-key"}}}}`, SecretRef{Key: "other-key"}},
-		{"key and label", `{"upstreams":{"/v1/responses":{"api_key_secret":{"key":"other-key","label":"prod"}}}}`, SecretRef{Key: "other-key", Label: "prod"}},
+		{"key only", `{"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"api_key_secret":{"key":"other-key"}}}}}}`, SecretRef{Key: "other-key"}},
+		{"key and label", `{"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"api_key_secret":{"key":"other-key","label":"prod"}}}}}}`, SecretRef{Key: "other-key", Label: "prod"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			merged, err := mergeJSON([]byte(remote), []byte(tc.local))
@@ -142,7 +142,7 @@ func TestMergeJSONReplacesSecretReferencesWholesale(t *testing.T) {
 			if err = decodeConfig(merged, &c); err != nil {
 				t.Fatal(err)
 			}
-			u := c.Upstreams["/v1/responses"]
+			u := c.Providers["p"].Upstreams["/v1/responses"]
 			if u.APIKeySecret == nil || *u.APIKeySecret != tc.want {
 				t.Fatalf("secret ref = %+v, want %+v", u.APIKeySecret, tc.want)
 			}
@@ -152,7 +152,7 @@ func TestMergeJSONReplacesSecretReferencesWholesale(t *testing.T) {
 		})
 	}
 	// Ordinary objects such as headers still merge key by key.
-	merged, err := mergeJSON([]byte(remote), []byte(`{"upstreams":{"/v1/responses":{"headers":{"x-b":"local"}}}}`))
+	merged, err := mergeJSON([]byte(remote), []byte(`{"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"headers":{"x-b":"local"}}}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestMergeJSONReplacesSecretReferencesWholesale(t *testing.T) {
 	if err = decodeConfig(merged, &c); err != nil {
 		t.Fatal(err)
 	}
-	u := c.Upstreams["/v1/responses"]
+	u := c.Providers["p"].Upstreams["/v1/responses"]
 	if u.Headers["x-a"] != "remote" || u.Headers["x-b"] != "local" || u.APIKeySecret == nil || u.APIKeySecret.Version != 3 {
 		t.Fatal("deep merge of headers or untouched secret reference regressed")
 	}
@@ -168,15 +168,15 @@ func TestMergeJSONReplacesSecretReferencesWholesale(t *testing.T) {
 
 func TestKMSLocalSecretOverrideDoesNotInheritRemoteVersion(t *testing.T) {
 	server, factory := kmsFixture(t)
-	server.SetParameter("demo/proxy", "config", `{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","api_key_secret":{"key":"provider-key","version":3}}}}`)
+	server.SetParameter("demo/proxy", "config", `{"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"url":"https://provider.example/v1/responses","api_key_secret":{"key":"provider-key","version":3}}}}}}`)
 	server.SetSecretVersion("demo/proxy", "provider-key", []byte("remote-secret"), "string", 3)
 	server.SetSecretVersion("demo/proxy", "other-key", []byte("local-secret"), "string", 1)
-	path := localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy","config_key":"config"},"upstreams":{"/v1/responses":{"api_key_secret":{"key":"other-key"}}}}`)
+	path := localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy","config_key":"config"},"default_provider":"p","providers":{"p":{"upstreams":{"/v1/responses":{"api_key_secret":{"key":"other-key"}}}}}}`)
 	c, err := load(context.Background(), path, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Upstreams["/v1/responses"].APIKey != "local-secret" {
+	if c.Providers["p"].Upstreams["/v1/responses"].APIKey != "local-secret" {
 		t.Fatal("local secret override did not select the current version of its own key")
 	}
 }

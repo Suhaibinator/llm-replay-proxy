@@ -43,7 +43,6 @@ export type Recording = {
   collection_id: number;
   key: string;
   route: string;
-  upstream_identity: string;
   streaming: boolean;
   active_revision_id: number;
   created_at: string;
@@ -69,6 +68,8 @@ export type History = {
   id: number;
   collection_id: number;
   route: string;
+  /** Upstream provider the request selected; "" when none was resolved. */
+  provider: string;
   key: string;
   request: RequestSummary | null;
   outcome: string;
@@ -316,6 +317,11 @@ export type Insights = {
   models: ModelInsight[];
   /** hit_rate: same definition as totals.hit_rate, over the route's rows. */
   routes: (OutcomeCounts & { route: string; hit_rate: number | null })[];
+  /**
+   * Per upstream provider; rows without one are "unknown". hit_rate: same
+   * definition as totals.hit_rate, over the provider's rows.
+   */
+  providers: (OutcomeCounts & { provider: string; hit_rate: number | null })[];
   latency: { upstream: LatencyStats; replay: LatencyStats };
   top_recordings: {
     recording_id: number;

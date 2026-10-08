@@ -8,6 +8,7 @@ export type ViewLink = {
   view: ViewName;
   thread?: string;
   model?: string;
+  provider?: string;
   outcome?: string;
 };
 

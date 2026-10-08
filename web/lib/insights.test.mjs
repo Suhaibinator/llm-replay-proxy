@@ -156,6 +156,12 @@ test("range windows align to UTC buckets", () => {
     ),
     false,
   );
+  const byProvider = new URL(
+    insightsURL(3, "7d", "", now, "openrouter"),
+    "http://x",
+  ).searchParams;
+  assert.equal(byProvider.get("provider"), "openrouter");
+  assert.equal(byProvider.has("model"), false);
 });
 
 test("fillSeries zero-fills missing buckets and keeps order", () => {

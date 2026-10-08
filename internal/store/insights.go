@@ -17,12 +17,13 @@ import (
 // historyRow is one history row with the summaries the dashboard reads: its
 // request's and, when it served one, its revision's.
 type historyRow struct {
-	id, recordingID                                   int64
-	route, outcome, lookup, source, detail, createdAt string
-	duration, first                                   *int64
-	at                                                time.Time
-	req                                               *model.RequestSummary
-	resp                                              *model.ResponseSummary
+	id, recordingID                                  int64
+	route, provider, outcome, lookup, source, detail string
+	createdAt                                        string
+	duration, first                                  *int64
+	at                                               time.Time
+	req                                              *model.RequestSummary
+	resp                                             *model.ResponseSummary
 }
 
 // model attributes a row to the model that answered it, else the one asked.
@@ -36,6 +37,14 @@ func (r *historyRow) model() string {
 	return "unknown"
 }
 
+// providerName attributes a row to the provider it selected.
+func (r *historyRow) providerName() string {
+	if r.provider == "" {
+		return "unknown"
+	}
+	return r.provider
+}
+
 func (r *historyRow) thread() string {
 	if r.req == nil {
 		return ""
@@ -43,7 +52,7 @@ func (r *historyRow) thread() string {
 	return r.req.Thread
 }
 
-const historyRowCols = `h.id,h.recording_id,h.route,h.outcome,h.lookup_outcome,h.source,h.detail,h.created_at,h.duration_ms,h.first_event_ms,
+const historyRowCols = `h.id,h.recording_id,h.route,h.provider,h.outcome,h.lookup_outcome,h.source,h.detail,h.created_at,h.duration_ms,h.first_event_ms,
  h.request_body,b.summary_v,b.summary,h.revision_id,v.response_summary_v,v.response_summary`
 
 // historyFrom joins history rows (h) to their request bodies (b) and served
@@ -75,7 +84,7 @@ func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]hi
 		var r historyRow
 		var body, revision, reqV, respV sql.NullInt64
 		var reqRaw, respRaw sql.RawBytes
-		if err = rows.Scan(&r.id, &r.recordingID, &r.route, &r.outcome, &r.lookup, &r.source, &r.detail, &r.createdAt, &r.duration, &r.first,
+		if err = rows.Scan(&r.id, &r.recordingID, &r.route, &r.provider, &r.outcome, &r.lookup, &r.source, &r.detail, &r.createdAt, &r.duration, &r.first,
 			&body, &reqV, &reqRaw, &revision, &respV, &respRaw); err != nil {
 			return nil, err
 		}
@@ -330,9 +339,18 @@ func groupThreads(rows []historyRow) []*threadAgg {
 	return out
 }
 
+// InsightFilter restricts Insights to the rows attributed to one model and/or
+// one provider, as the Models and Providers breakdowns name them; empty
+// fields do not filter.
+type InsightFilter struct{ Model, Provider string }
+
+func (f InsightFilter) keep(r *historyRow) bool {
+	return (f.Model == "" || r.model() == f.Model) && (f.Provider == "" || r.providerName() == f.Provider)
+}
+
 // Insights aggregates a collection's history in [from,to) for the dashboard,
-// optionally restricted to the rows attributed to one model.
-func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, modelFilter string) (model.Insights, error) {
+// optionally restricted by filter.
+func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, filter InsightFilter) (model.Insights, error) {
 	if !from.Before(to) {
 		return model.Insights{}, errors.New("insights start must be before end")
 	}
@@ -348,14 +366,14 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 	}
 	kept := rows[:0]
 	for i := range rows {
-		if inRange(&rows[i], from, to) && (modelFilter == "" || rows[i].model() == modelFilter) {
+		if inRange(&rows[i], from, to) && filter.keep(&rows[i]) {
 			kept = append(kept, rows[i])
 		}
 	}
 	rows = kept
 
 	out := model.Insights{From: from.Format(time.RFC3339), To: to.Format(time.RFC3339), Bucket: bucket,
-		Series: []model.InsightBucket{}, Models: []model.ModelInsight{}, Routes: []model.RouteInsight{},
+		Series: []model.InsightBucket{}, Models: []model.ModelInsight{}, Routes: []model.RouteInsight{}, Providers: []model.ProviderInsight{},
 		TopRecordings: []model.TopRecording{}, TopThreads: []model.ThreadSummary{}}
 	type bucketAgg struct {
 		model.InsightBucket
@@ -370,6 +388,10 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 	}
 	type routeAgg struct {
 		model.RouteInsight
+		rate hitRate
+	}
+	type providerAgg struct {
+		model.ProviderInsight
 		rate hitRate
 	}
 	type recordingAgg struct {
@@ -389,6 +411,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 	}
 	models := map[string]*modelAgg{}
 	routes := map[string]*routeAgg{}
+	providers := map[string]*providerAgg{}
 	recordings := map[int64]*recordingAgg{}
 	var totals tokenSet
 	var lat latencies
@@ -425,6 +448,14 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 		}
 		route.Count(r.outcome)
 		route.rate.add(r)
+		providerName := r.providerName()
+		provider := providers[providerName]
+		if provider == nil {
+			provider = &providerAgg{ProviderInsight: model.ProviderInsight{Provider: providerName}}
+			providers[providerName] = provider
+		}
+		provider.Count(r.outcome)
+		provider.rate.add(r)
 		if r.outcome == "hit" && r.recordingID != 0 {
 			rec := recordings[r.recordingID]
 			if rec == nil {
@@ -465,6 +496,13 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, mod
 	}
 	slices.SortFunc(out.Routes, func(a, b model.RouteInsight) int {
 		return cmp.Or(cmp.Compare(b.Requests, a.Requests), cmp.Compare(a.Route, b.Route))
+	})
+	for _, p := range providers {
+		p.HitRate = p.rate.value()
+		out.Providers = append(out.Providers, p.ProviderInsight)
+	}
+	slices.SortFunc(out.Providers, func(a, b model.ProviderInsight) int {
+		return cmp.Or(cmp.Compare(b.Requests, a.Requests), cmp.Compare(a.Provider, b.Provider))
 	})
 	out.Latency.Upstream, out.Latency.Replay = lat.upstream.stats(), lat.replay.stats()
 	for id, rec := range recordings {

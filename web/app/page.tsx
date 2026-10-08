@@ -312,6 +312,7 @@ function Shell() {
       filter: {
         thread: route.thread,
         model: route.model,
+        provider: route.provider,
         outcome: route.outcome,
       },
       inspectRecording,
@@ -324,6 +325,7 @@ function Shell() {
       refreshKey,
       route.thread,
       route.model,
+      route.provider,
       route.outcome,
       inspectRecording,
       openHistory,

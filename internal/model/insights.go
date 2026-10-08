@@ -88,6 +88,15 @@ type ModelInsight struct {
 	Replay         LatencyStats `json:"replay"`
 }
 
+// ProviderInsight counts the rows that selected one upstream provider; rows
+// recorded without one are attributed to "unknown".
+type ProviderInsight struct {
+	OutcomeCounts
+	Provider string `json:"provider"`
+	// HitRate is defined as InsightTotals.HitRate, over this provider's rows.
+	HitRate *float64 `json:"hit_rate"`
+}
+
 type RouteInsight struct {
 	OutcomeCounts
 	Route string `json:"route"`
@@ -120,14 +129,15 @@ type TopRecording struct {
 }
 
 type Insights struct {
-	From    string          `json:"from"`
-	To      string          `json:"to"`
-	Bucket  string          `json:"bucket"`
-	Totals  InsightTotals   `json:"totals"`
-	Series  []InsightBucket `json:"series"`
-	Models  []ModelInsight  `json:"models"`
-	Routes  []RouteInsight  `json:"routes"`
-	Latency struct {
+	From      string            `json:"from"`
+	To        string            `json:"to"`
+	Bucket    string            `json:"bucket"`
+	Totals    InsightTotals     `json:"totals"`
+	Series    []InsightBucket   `json:"series"`
+	Models    []ModelInsight    `json:"models"`
+	Routes    []RouteInsight    `json:"routes"`
+	Providers []ProviderInsight `json:"providers"`
+	Latency   struct {
 		Upstream LatencyStats `json:"upstream"`
 		Replay   LatencyStats `json:"replay"`
 	} `json:"latency"`

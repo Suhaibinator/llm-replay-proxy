@@ -24,7 +24,7 @@ func TestStateGuardSurvivesActiveCollectionSwitch(t *testing.T) {
 		calls++
 		return response(`{"id":"state_from_first","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"first"}]}]}`, "application/json"), nil
 	})}
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	if got := perform(h, "/v1/responses", `{"input":"start"}`); got.Code != 200 {
 		t.Fatalf("warm response: %d %s", got.Code, got.Body.String())
 	}
@@ -70,7 +70,7 @@ func TestTransportCannotRetryOrFollowRedirects(t *testing.T) {
 			var calls atomic.Int32
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { calls.Add(1); return tc.roundTrip(r) })}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid", Headers: map[string]string{"Idempotency-Key": "configured"}}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid", Headers: map[string]string{"Idempotency-Key": "configured"}}}}})
 			_ = perform(h, "/v1/responses", `{"input":"x"}`)
 			if calls.Load() != 1 {
 				t.Fatalf("round trips = %d, want exactly one", calls.Load())
@@ -87,7 +87,7 @@ func TestValidTerminalFrameWithTransportReadErrorIsNotPublished(t *testing.T) {
 		return resp, nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/chat/completions": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/chat/completions": {URL: "https://upstream.invalid"}}}})
 	live := perform(h, "/v1/chat/completions", `{"stream":true}`)
 	if live.Body.String() != payload {
 		t.Fatalf("live bytes changed: %q", live.Body.String())
@@ -106,7 +106,7 @@ func TestHTTPStreamFramesSplitAtEveryByteRecordExactly(t *testing.T) {
 		return resp, nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/chat/completions": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/chat/completions": {URL: "https://upstream.invalid"}}}})
 	if got := perform(h, "/v1/chat/completions", `{"stream":true}`); got.Body.String() != payload {
 		t.Fatal("live bytes changed")
 	}
@@ -126,7 +126,7 @@ func TestCancellationAtTerminalReadPreventsPublication(t *testing.T) {
 		return resp, nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"x"}`)).WithContext(ctx)
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	setMode(t, db, "replay")

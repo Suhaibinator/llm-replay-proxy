@@ -22,7 +22,7 @@ func TestKMSCredentialReachesUpstreamButNotSnapshot(t *testing.T) {
 	server, factory := kmsFixture(t)
 	const secret = "kms-provider-credential-should-never-be-persisted"
 	server.SetSecret("demo/proxy", "provider-key", []byte(secret))
-	cfg, err := load(context.Background(), localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy"},"upstreams":{"/v1/chat/completions":{"url":"https://upstream.example/v1/chat/completions","api_key_secret":{"key":"provider-key"}}}}`), factory)
+	cfg, err := load(context.Background(), localConfig(t, `{"kms":{"endpoint":"fake","namespace":"demo/proxy"},"default_provider":"p","providers":{"p":{"upstreams":{"/v1/chat/completions":{"url":"https://upstream.example/v1/chat/completions","api_key_secret":{"key":"provider-key"}}}}}}`), factory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,14 +39,14 @@ func TestKMSCredentialReachesUpstreamButNotSnapshot(t *testing.T) {
 	if err = db.SetSettings(context.Background(), settings); err != nil {
 		t.Fatal(err)
 	}
-	up := cfg.Upstreams["/v1/chat/completions"]
+	up := cfg.Providers["p"].Upstreams["/v1/chat/completions"]
 	client := &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("Authorization") != "Bearer "+secret {
 			t.Error("resolved credential was not sent to fixed upstream")
 		}
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chat1","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`))}, nil
 	})}
-	handler := proxy.New(db, proxy.Config{Client: client, Upstreams: map[string]proxy.Upstream{"/v1/chat/completions": {URL: up.URL, APIKey: up.APIKey}}})
+	handler := proxy.New(db, proxy.Config{Client: client, DefaultProvider: "p", Providers: map[string]map[string]proxy.Upstream{"p": {"/v1/chat/completions": {URL: up.URL, APIKey: up.APIKey}}}})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"fixture","messages":[{"role":"user","content":"hello"}]}`)))
 	if recorder.Code != 200 {

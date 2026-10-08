@@ -28,11 +28,11 @@ func publishRoute(t *testing.T, s *Store, cid int64, route string, request any, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, input, err := matching.Key(route, "test", req, nil)
+	key, input, err := matching.Key(route, req, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return publishOne(t, s, model.Recording{CollectionID: cid, Key: key, Route: route, Request: req, MatchingInput: input, UpstreamIdentity: "test"},
+	return publishOne(t, s, model.Recording{CollectionID: cid, Key: key, Route: route, Request: req, MatchingInput: input},
 		model.Revision{Status: 200, Headers: map[string]string{"Content-Type": "application/json"}, Body: response, Source: "recorded"})
 }
 
@@ -100,7 +100,7 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	row(71, "miss", "miss", "proxy", nil, none, 0, nil) // no request body
 
 	from, to := base, base.Add(3*time.Hour)
-	in, err := s.Insights(ctx, cid, from, to, "")
+	in, err := s.Insights(ctx, cid, from, to, InsightFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 		t.Fatalf("top threads %+v", in.TopThreads)
 	}
 
-	only, err := s.Insights(ctx, cid, from, to, "claude-x")
+	only, err := s.Insights(ctx, cid, from, to, InsightFilter{Model: "claude-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,11 +194,11 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 		only.Totals.ReplayedTokens.Input != 20 || len(only.TopRecordings) != 1 || only.TopRecordings[0].RecordingID != b1.Recording.ID {
 		t.Fatalf("model filter %+v", only.Totals)
 	}
-	day, err := s.Insights(ctx, cid, base.AddDate(0, 0, -6), base.AddDate(0, 0, 1), "")
+	day, err := s.Insights(ctx, cid, base.AddDate(0, 0, -6), base.AddDate(0, 0, 1), InsightFilter{})
 	if err != nil || day.Bucket != "day" || len(day.Series) != 8 || day.Totals.Requests != 14 {
 		t.Fatalf("daily insights %s %d %d %v", day.Bucket, len(day.Series), day.Totals.Requests, err)
 	}
-	empty, err := s.Insights(ctx, cid, base.AddDate(1, 0, 0), base.AddDate(1, 0, 1), "")
+	empty, err := s.Insights(ctx, cid, base.AddDate(1, 0, 0), base.AddDate(1, 0, 1), InsightFilter{})
 	if err != nil || empty.Totals.HitRate != nil || empty.Totals.UpstreamCost != nil || empty.Models == nil || empty.TopThreads == nil {
 		t.Fatalf("empty insights %+v %v", empty.Totals, err)
 	}
@@ -220,7 +220,7 @@ func TestDeletedRecordingKeepsHistoryButDropsAttribution(t *testing.T) {
 	if err := s.DeleteRecording(ctx, e.Recording.ID); err != nil {
 		t.Fatal(err)
 	}
-	in, err := s.Insights(ctx, 1, now.Add(-time.Hour), now.Add(time.Hour), "")
+	in, err := s.Insights(ctx, 1, now.Add(-time.Hour), now.Add(time.Hour), InsightFilter{})
 	if err != nil || in.Totals.Hits != 1 || in.Totals.ReplayedTokens.Input != 0 || len(in.TopRecordings) != 0 {
 		t.Fatalf("after delete %+v %+v %v", in.Totals, in.TopRecordings, err)
 	}

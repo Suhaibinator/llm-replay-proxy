@@ -23,7 +23,7 @@ var ErrActiveCollection = errors.New("store: collection is active")
 // summarized and replay hits counted from history. No request bytes are read
 // unless a summary has not been computed yet.
 func (s *Store) Recordings(ctx context.Context, cid int64) ([]model.RecordingSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.collection_id,r.key,r.route,r.upstream_identity,r.streaming,r.active_revision_id,r.created_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.collection_id,r.key,r.route,r.streaming,r.active_revision_id,r.created_at,
  v.request_body,coalesce(v.created_at,''),coalesce(v.source,''),(SELECT count(*) FROM revisions x WHERE x.recording_id=r.id)
 FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
@@ -35,7 +35,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 		var r model.RecordingSummary
 		var stream int
 		var active, body sql.NullInt64
-		if err = rows.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &r.UpstreamIdentity, &stream, &active, &r.CreatedAt, &body, &r.UpdatedAt, &r.Source, &r.Revisions); err != nil {
+		if err = rows.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &stream, &active, &r.CreatedAt, &body, &r.UpdatedAt, &r.Source, &r.Revisions); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -90,28 +90,33 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 	return out, rows.Err()
 }
 
-const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome"
+const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,provider"
 
 func scanHistory(row interface{ Scan(...any) error }) (h model.History, body sql.NullInt64, err error) {
-	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus)
+	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus, &h.Provider)
 	return
 }
 
 // History lists a collection's newest calls with their requests summarized.
 func (s *Store) History(ctx context.Context, cid int64, limit int) ([]model.History, error) {
-	return s.HistoryAfter(ctx, cid, 0, limit)
+	return s.HistoryAfter(ctx, cid, 0, limit, "")
 }
 
 // HistoryAfter lists calls newer than afterID, newest first, so a poller can
 // fetch only what it has not seen. History rows never change once written.
-func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int) ([]model.History, error) {
+// A non-empty provider keeps only the calls that selected that provider.
+func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int, provider string) ([]model.History, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+historyCols+" FROM history WHERE collection_id=? AND id>? ORDER BY id DESC LIMIT ?", cid, afterID, limit)
+	filtered, value := provider != "", provider
+	if provider == "unknown" {
+		value = "" // rows without a provider, as Insights names them
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT "+historyCols+" FROM history WHERE collection_id=? AND id>? AND (NOT ? OR provider=?) ORDER BY id DESC LIMIT ?", cid, afterID, filtered, value, limit)
 	if err != nil {
 		return nil, err
 	}

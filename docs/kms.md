@@ -2,7 +2,7 @@
 
 The proxy optionally uses the Go SDK from the adjacent [KMS project](../../kms/README.md). The build pins `github.com/Suhaibinator/kms` v0.4.5; there is no local module replacement or sibling checkout requirement for building the executable. Its SDK requires Go 1.27.1.
 
-Configuration is resolved once before the server starts. No KMS request is made during inference or replay. Restart the process to adopt configuration changes or rotate credentials. This keeps the non-secret upstream identity fixed while requests are being recorded or replayed.
+Configuration is resolved once before the server starts. No KMS request is made during inference or replay. Restart the process to adopt configuration changes or rotate credentials. This keeps the provider set fixed while requests are being recorded or replayed.
 
 ## Bootstrap
 
@@ -40,25 +40,38 @@ Store a JSON parameter at `proxy/config`, using the same fields as local configu
 {
   "listen": "127.0.0.1:8080",
   "database": "replay.sqlite",
-  "upstreams": {
-    "/v1/chat/completions": {
-      "url": "https://api.openai.com/v1/chat/completions",
-      "api_key_secret": {"key": "providers/openai", "version": 3}
+  "default_provider": "direct",
+  "providers": {
+    "direct": {
+      "upstreams": {
+        "/v1/chat/completions": {
+          "url": "https://api.openai.com/v1/chat/completions",
+          "api_key_secret": {"key": "providers/openai", "version": 3}
+        },
+        "/v1/responses": {
+          "url": "https://api.openai.com/v1/responses",
+          "api_key_secret": {"key": "providers/openai", "version": 3}
+        },
+        "/v1/messages": {
+          "url": "https://api.anthropic.com/v1/messages",
+          "headers": {"anthropic-version": "2023-06-01"},
+          "api_key_secret": {"key": "providers/anthropic"}
+        }
+      }
     },
-    "/v1/responses": {
-      "url": "https://api.openai.com/v1/responses",
-      "api_key_secret": {"key": "providers/openai", "version": 3}
-    },
-    "/v1/messages": {
-      "url": "https://api.anthropic.com/v1/messages",
-      "headers": {"anthropic-version": "2023-06-01"},
-      "api_key_secret": {"key": "providers/anthropic"}
+    "openrouter": {
+      "upstreams": {
+        "/v1/chat/completions": {
+          "url": "https://openrouter.ai/api/v1/chat/completions",
+          "api_key_secret": {"key": "providers/openrouter", "label": "prod"}
+        }
+      }
     }
   }
 }
 ```
 
-An `api_key_secret` supports `key`, optional immutable `version`, optional `label` (mutually exclusive with version), and optional `binding_key_env` for bound secrets. Binding keys and KMS authentication tokens are read from environment variables; plaintext values never enter matching inputs, SQLite, exports, or the control API.
+Every provider's upstream entries accept `api_key_secret`; each resolves independently at startup. An `api_key_secret` supports `key`, optional immutable `version`, optional `label` (mutually exclusive with version), and optional `binding_key_env` for bound secrets. Binding keys and KMS authentication tokens are read from environment variables; plaintext values never enter matching inputs, SQLite, exports, or the control API.
 
 Pin `kms.config_version` to select an immutable JSON parameter version. Pin secret versions inside that document when the configuration and credentials must refer to a repeatable generation. Omitting versions reads the current values at startup. This integration uses the existing SDK's read APIs, not the managed-release hot-reload layer.
 
@@ -80,12 +93,12 @@ For secrets-only integration, omit `config_key`, keep non-secret upstream settin
 
 ## Precedence and failures
 
-Non-secret configuration precedence is **built-in defaults → KMS JSON parameter → local JSON file → environment → CLI flags**. JSON objects are merged recursively so a local upstream identity or header override can retain the remote URL. Secret references (`api_key_secret`) are the exception: a local reference replaces the remote one as a whole, so `{"key": "other-key"}` reads the current version of `other-key` rather than inheriting a remote `version` or `label` pin. The KMS parameter cannot replace KMS bootstrap settings or contain inline `api_key` values.
+Non-secret configuration precedence is **built-in defaults → KMS JSON parameter → local JSON file → environment → CLI flags**. JSON objects are merged recursively so a local header override (for example under `providers.direct.upstreams`) can retain the remote URL, and a local file can add a provider to the remote set. Secret references (`api_key_secret`) are the exception: a local reference replaces the remote one as a whole, so `{"key": "other-key"}` reads the current version of `other-key` rather than inheriting a remote `version` or `label` pin. The KMS parameter cannot replace KMS bootstrap settings or contain inline `api_key` values.
 
-Credential precedence is **`REPLAY_{CHAT,RESPONSES,ANTHROPIC}_API_KEY` → named `api_key_env` → local inline `api_key` → KMS secret reference**. JWT signing key precedence is **`REPLAY_JWT_KEY` → `auth.signing_key_file` or `auth.signing_key_secret` → generated `<database>.jwt-key`**. An explicitly empty environment credential suppresses a KMS secret read, allowing credential-free replay when non-secret settings are available. A local inline key can be cleared with `"api_key": ""` to use a secret reference instead.
+Credential precedence, per provider upstream, is **named `api_key_env` → local inline `api_key` → KMS secret reference**. JWT signing key precedence is **`REPLAY_JWT_KEY` → `auth.signing_key_file` or `auth.signing_key_secret` → generated `<database>.jwt-key`**. An explicitly empty environment credential suppresses a KMS secret read, allowing credential-free replay when non-secret settings are available. A local inline key can be cleared with `"api_key": ""` to use a secret reference instead.
 
 An explicitly configured KMS parameter/secret that cannot be resolved fails startup; unavailable, denied, missing, or malformed data does not silently fall back to defaults. Errors identify the operation and failure category without echoing remote error details or credential values. The last running process is unaffected by later KMS outages because its startup snapshot is held in memory.
 
-For completely offline startup, use a local configuration with the same non-secret upstream URLs, identities, and headers and omit the `kms` object and secret references. Supply the JWT signing key through `REPLAY_JWT_KEY` or `auth.signing_key_file` so existing tokens keep working. The original exact matching keys remain valid. Do not export secrets into SQLite to make offline startup work.
+For completely offline startup, omit the `kms` object and secret references; matching keys do not depend on provider settings, so a configuration without any providers still replays every recording (forwarding then fails with `upstream_not_configured`). Supply the JWT signing key through `REPLAY_JWT_KEY` or `auth.signing_key_file` so existing tokens keep working. Do not export secrets into SQLite to make offline startup work.
 
 Tests use the KMS project's real SDK with its in-process gRPC fake to verify parameter/secret reads, version pins, binding credentials, overrides, transport validation, and failures without requiring a live KMS installation.

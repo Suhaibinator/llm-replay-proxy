@@ -113,9 +113,12 @@ with no `response.output_text.delta` event to rewrite.
 ## Matching keys
 
 Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
-exclusions also matches as `[]`. The key is the SHA-256 of the matching input,
-which is derived from the request, route, upstream identity, and collection
-exclusions whenever it is displayed and is not stored.
+exclusions also matches as `[]`. The key is the SHA-256 of the matching input
+`{"version":2,"api":…,"body":…}`, where `api` is `chat_completions`,
+`responses` or `messages` and `body` is the canonical request after collection
+exclusions. The upstream provider, URL and headers are not part of it, so a
+recording replays whichever provider a request selects. The input is derived
+whenever it is displayed and is not stored.
 
 Shared Go data types are in `internal/model`. Storage exposes atomic
 `PublishIfActive` and `RestoreIfActive` operations for optimistic editing, while

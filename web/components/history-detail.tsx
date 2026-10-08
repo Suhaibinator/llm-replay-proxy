@@ -67,6 +67,7 @@ export function HistoryDetail({
         {row.route}
       </code>,
     ],
+    ["Provider", row.provider || "—"],
     ["Served", SOURCE[row.source] || row.source || "—"],
     ["Lookup", LOOKUP[row.lookup_outcome] || row.lookup_outcome || "—"],
     ["Duration", formatMs(row.duration_ms)],

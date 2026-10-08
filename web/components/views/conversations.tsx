@@ -180,6 +180,7 @@ function Conversations(props: ViewProps) {
         id: t.turn.history_id,
         collection_id: collectionId,
         route: thread.route,
+        provider: "",
         key: "",
         request: null,
         outcome: t.turn.outcome,

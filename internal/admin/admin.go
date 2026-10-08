@@ -109,7 +109,7 @@ func (h *handler) insights(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	v, err := h.db.Insights(r.Context(), id, from, to, r.URL.Query().Get("model"))
+	v, err := h.db.Insights(r.Context(), id, from, to, store.InsightFilter{Model: r.URL.Query().Get("model"), Provider: r.URL.Query().Get("provider")})
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -374,7 +374,7 @@ func (h *handler) history(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	v, err := h.db.HistoryAfter(r.Context(), id, after, limit)
+	v, err := h.db.HistoryAfter(r.Context(), id, after, limit, r.URL.Query().Get("provider"))
 	if err != nil {
 		writeStoreError(w, err)
 		return

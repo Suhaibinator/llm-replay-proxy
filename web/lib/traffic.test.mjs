@@ -14,6 +14,7 @@ import {
   outcomeCounts,
   outcomeTone,
   relativeTime,
+  rowProvider,
   shortModel,
   timingScale,
 } from "./traffic.ts";
@@ -24,6 +25,7 @@ const row = (id, over = {}) => ({
   id,
   collection_id: 1,
   route: "/v1/responses",
+  provider: "openai",
   key: `key${id}`,
   request: {
     model: "gpt-a",
@@ -184,4 +186,21 @@ test("formatters", () => {
   assert.equal(timingScale(many), 390, "an outlier does not set the scale");
   assert.equal(shortModel("anthropic/claude-sonnet-4.5"), "claude-sonnet-4.5");
   assert.equal(shortModel("gpt-5"), "gpt-5");
+});
+
+test("provider filter matches rows, naming rows without one unknown", () => {
+  const rows = [
+    row(1),
+    row(2, { provider: "openrouter" }),
+    row(3, { provider: "" }),
+  ];
+  const by = (provider) =>
+    ids(filterTraffic(rows, { ...emptyTrafficFilter, provider }));
+  assert.deepEqual(by("openrouter"), [2]);
+  assert.deepEqual(by("unknown"), [3]);
+  assert.deepEqual(by(""), [1, 2, 3]);
+  assert.deepEqual(
+    facet(rows, rowProvider).map((f) => f.value),
+    ["openai", "openrouter", "unknown"],
+  );
 });

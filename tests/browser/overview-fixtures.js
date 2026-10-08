@@ -363,6 +363,15 @@ function buildInsights({
     series: series.map(withRate),
     models: modelList.map(withRate),
     routes: [...routes.values()].map(withRate),
+    providers: empty
+      ? []
+      : [
+          {
+            ...totals,
+            provider: "openrouter",
+            hit_rate: lookups ? totals.hits / lookups : null,
+          },
+        ],
     latency: { upstream: merge("up"), replay: merge("re") },
     top_recordings,
     top_threads,

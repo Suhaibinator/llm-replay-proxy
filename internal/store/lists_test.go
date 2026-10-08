@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/local/llm-replay-proxy/internal/model"
 )
@@ -64,7 +67,7 @@ func TestHistoryAfterReturnsOnlyNewerRows(t *testing.T) {
 	if all[0].Summary != nil || all[1].Summary == nil || all[1].Summary.Preview != "4" {
 		t.Fatalf("summaries: %+v %+v", all[0].Summary, all[1].Summary)
 	}
-	newer, err := s.HistoryAfter(ctx, 1, all[2].ID, 10)
+	newer, err := s.HistoryAfter(ctx, 1, all[2].ID, 10, "")
 	if err != nil || len(newer) != 2 || newer[0].ID != all[0].ID || newer[1].ID != all[1].ID {
 		t.Fatalf("after %d: %+v %v", all[2].ID, newer, err)
 	}
@@ -167,5 +170,40 @@ func TestPruneHistoryKeepsNewestRowsPerCollection(t *testing.T) {
 	settings.HistoryLimit = -1
 	if err = s.SetSettings(ctx, settings); err == nil {
 		t.Fatal("negative history limit accepted")
+	}
+}
+
+func TestHistoryAndInsightsFilterByProvider(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	for i, provider := range []string{"openai", "openrouter", "openai", ""} {
+		addHistory(t, s, model.History{CollectionID: 1, Provider: provider, Key: fmt.Sprint(i), Request: []byte(fmt.Sprintf(`{"input":"%d"}`, i)), Outcome: "miss"})
+	}
+	for provider, want := range map[string]int{"": 4, "openai": 2, "openrouter": 1, "unknown": 1, "absent": 0} {
+		rows, err := s.HistoryAfter(ctx, 1, 0, 10, provider)
+		if err != nil || len(rows) != want {
+			t.Fatalf("provider %q: %d rows (%v), want %d", provider, len(rows), err, want)
+		}
+		for _, row := range rows {
+			if provider != "" && row.Provider != strings.TrimSuffix(provider, "unknown") {
+				t.Fatalf("provider %q returned row for %q", provider, row.Provider)
+			}
+		}
+	}
+	from, to := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+	all, err := s.Insights(ctx, 1, from, to, InsightFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range all.Providers {
+		got = append(got, fmt.Sprintf("%s=%d", p.Provider, p.Requests))
+	}
+	if want := []string{"openai=2", "openrouter=1", "unknown=1"}; !slices.Equal(got, want) {
+		t.Fatalf("provider breakdown = %v, want %v", got, want)
+	}
+	only, err := s.Insights(ctx, 1, from, to, InsightFilter{Provider: "openrouter"})
+	if err != nil || only.Totals.Requests != 1 || len(only.Providers) != 1 {
+		t.Fatalf("filtered insights: %+v %v", only.Totals, err)
 	}
 }

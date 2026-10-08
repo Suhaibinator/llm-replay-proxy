@@ -22,7 +22,7 @@ func TestUpstreamHTTPErrorsAreNeverPublishedForAnyProtocol(t *testing.T) {
 				return matrixResponse(http.StatusTooManyRequests, `{"error":{"message":"slow down"}}`, "application/json"), nil
 			})}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{route: {URL: "https://upstream.invalid"}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {route: {URL: "https://upstream.invalid"}}}})
 
 			live := perform(h, route, `{}`)
 			if live.Code != http.StatusTooManyRequests || !strings.Contains(live.Body.String(), "slow down") {
@@ -77,7 +77,7 @@ func TestMalformedAndIncompleteSSEAreNeverPublished(t *testing.T) {
 				return matrixResponse(http.StatusOK, tc.stream, "text/event-stream"), nil
 			})}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{tc.route: {URL: "https://upstream.invalid"}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {tc.route: {URL: "https://upstream.invalid"}}}})
 
 			live := perform(h, tc.route, `{"stream":true}`)
 			if live.Code != http.StatusOK || live.Body.String() != tc.stream {
@@ -108,7 +108,7 @@ func TestCanceledRefreshPreservesPriorRevision(t *testing.T) {
 		return resp, nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{route: {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {route: {URL: "https://upstream.invalid"}}}})
 
 	if first := perform(h, route, requestBody); first.Code != http.StatusOK || first.Body.String() != oldBody {
 		t.Fatalf("initial record = %d %q", first.Code, first.Body.String())
@@ -157,7 +157,7 @@ func TestAutoModeRecordsMissesAndReplaysHits(t *testing.T) {
 		return matrixResponse(http.StatusOK, matrixChatBody(fmt.Sprintf("call-%d", calls)), "application/json"), nil
 	})}
 	db := openTestStore(t, "auto")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{route: {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {route: {URL: "https://upstream.invalid"}}}})
 
 	first := perform(h, route, `{"model":"demo","input":"same"}`)
 	second := perform(h, route, `{"input":"same","model":"demo"}`)
@@ -209,7 +209,7 @@ func TestRecordedProviderStateAllowsExactReplayButGuardsLiveRequests(t *testing.
 		return matrixResponse(http.StatusOK, matrixResponsesBody("resp_dependent", "continued"), "application/json"), nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{route: {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {route: {URL: "https://upstream.invalid"}}}})
 
 	exactRecorded := perform(h, route, exact)
 	if exactRecorded.Code != http.StatusOK {
@@ -250,7 +250,7 @@ func TestConcurrentIdenticalAutoMissesPublishSafely(t *testing.T) {
 		return matrixResponse(http.StatusOK, matrixChatBody(fmt.Sprintf("call-%d", call)), "application/json"), nil
 	})}
 	db := openTestStore(t, "auto")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{route: {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {route: {URL: "https://upstream.invalid"}}}})
 
 	results := make(chan *httptest.ResponseRecorder, n)
 	var wg sync.WaitGroup
@@ -336,7 +336,7 @@ func TestToolCallsRecordAndReplayAcrossProtocolsAndTransports(t *testing.T) {
 				return matrixResponse(http.StatusOK, tc.body, contentType), nil
 			})}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{tc.route: {URL: "https://upstream.invalid"}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {tc.route: {URL: "https://upstream.invalid"}}}})
 			requestBody := fmt.Sprintf(`{"model":"demo","stream":%t}`, tc.stream)
 
 			live := perform(h, tc.route, requestBody)

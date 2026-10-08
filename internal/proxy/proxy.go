@@ -27,11 +27,16 @@ import (
 const maxRequestBytes = 64 << 20
 const maxRecordedResponseBytes = 256 << 20
 
+// ProviderHeader names the request header that selects which configured
+// upstream provider serves a request. Without it the default provider does.
+// The provider never affects matching: a recording made through one provider
+// replays for requests that select another.
+const ProviderHeader = "X-Replay-Provider"
+
 type Upstream struct {
-	URL      string
-	APIKey   string
-	Identity string
-	Headers  map[string]string
+	URL     string
+	APIKey  string
+	Headers map[string]string
 }
 
 // Clock exists so replay pacing can be tested without wall-clock sleeps.
@@ -41,16 +46,19 @@ type Clock interface {
 }
 
 type Config struct {
-	Upstreams map[string]Upstream
-	Client    *http.Client
-	Clock     Clock
+	// Providers maps each provider name to its upstream per inference route.
+	Providers       map[string]map[string]Upstream
+	DefaultProvider string
+	Client          *http.Client
+	Clock           Clock
 }
 
 type handler struct {
-	db        *store.Store
-	upstreams map[string]Upstream
-	client    *http.Client
-	clock     Clock
+	db              *store.Store
+	providers       map[string]map[string]Upstream
+	defaultProvider string
+	client          *http.Client
+	clock           Clock
 }
 
 type realClock struct{}
@@ -83,11 +91,14 @@ func New(db *store.Store, cfg Config) http.Handler {
 	if clock == nil {
 		clock = realClock{}
 	}
-	upstreams := make(map[string]Upstream, len(cfg.Upstreams))
-	for route, upstream := range cfg.Upstreams {
-		upstreams[route] = normalizeUpstream(upstream)
+	providers := make(map[string]map[string]Upstream, len(cfg.Providers))
+	for name, routes := range cfg.Providers {
+		providers[name] = make(map[string]Upstream, len(routes))
+		for route, upstream := range routes {
+			providers[name][route] = normalizeUpstream(upstream)
+		}
 	}
-	return &handler{db: db, upstreams: upstreams, client: &clientCopy, clock: clock}
+	return &handler{db: db, providers: providers, defaultProvider: cfg.DefaultProvider, client: &clientCopy, clock: clock}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +150,11 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	provider, upstream, ok := h.selectProvider(w, r)
+	if !ok {
+		return
+	}
+
 	settings, err := h.db.Settings(r.Context())
 	if err != nil {
 		writeError(w, 500, "storage_error", err.Error())
@@ -149,13 +165,7 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "no_active_collection", "configure an active recording collection")
 		return
 	}
-	upstream, ok := h.upstreams[r.URL.Path]
-	if !ok || upstream.URL == "" {
-		writeError(w, 503, "upstream_not_configured", "no upstream is configured for this route")
-		return
-	}
-	identity := upstreamIdentity(upstream)
-	key, canonical, err := match.Key(r.URL.Path, identity, body, collection.Exclusions)
+	key, canonical, err := match.Key(r.URL.Path, body, collection.Exclusions)
 	if err != nil {
 		writeError(w, 400, "matching_error", err.Error())
 		return
@@ -167,7 +177,7 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 			started := h.clock.Now()
 			first, replayErr := h.replay(w, r, entry, settings)
 			duration := h.clock.Now().Sub(started).Milliseconds()
-			item := model.History{CollectionID: collection.ID, Route: r.URL.Path, Key: key, Request: clone(body), Outcome: "hit", CacheStatus: "hit", RecordingID: entry.Recording.ID, Source: "replay", DurationMS: &duration, FirstEventMS: first}
+			item := model.History{CollectionID: collection.ID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(body), Outcome: "hit", CacheStatus: "hit", RecordingID: entry.Recording.ID, Source: "replay", DurationMS: &duration, FirstEventMS: first}
 			if replayErr == nil {
 				item.RevisionID = entry.Revision.ID
 			} else {
@@ -186,10 +196,15 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if settings.Mode == "replay" {
-			h.addHistory(r.Context(), model.History{CollectionID: collection.ID, Route: r.URL.Path, Key: key, Request: clone(body), Outcome: "miss", CacheStatus: "miss", Source: "proxy", Detail: "replay mode"})
+			h.addHistory(r.Context(), model.History{CollectionID: collection.ID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(body), Outcome: "miss", CacheStatus: "miss", Source: "proxy", Detail: "replay mode"})
 			writeError(w, 404, "recording_not_found", "no exact recording exists in the active collection")
 			return
 		}
+	}
+	// Replay needs no upstream, so a missing one only matters once forwarding.
+	if upstream.URL == "" {
+		writeError(w, 503, "upstream_not_configured", "no upstream is configured for this route")
+		return
 	}
 	blocked, stateID, err := h.recordedStateReference(r.Context(), collection.ID, body)
 	if err != nil {
@@ -202,12 +217,36 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		if settings.Mode == "auto" {
 			lookup = "miss"
 		}
-		h.addHistory(r.Context(), model.History{CollectionID: collection.ID, Route: r.URL.Path, Key: key, Request: clone(body), Outcome: "error", CacheStatus: lookup, Source: "proxy", Detail: detail})
+		h.addHistory(r.Context(), model.History{CollectionID: collection.ID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(body), Outcome: "error", CacheStatus: lookup, Source: "proxy", Detail: detail})
 		writeError(w, 409, "recorded_state_unavailable", detail+"; warm this exact request or reconstruct the conversation")
 		return
 	}
 
-	h.forward(w, r, body, canonical, key, collection.ID, upstream, identity, streaming, settings.Mode == "auto")
+	h.forward(w, r, body, canonical, key, collection.ID, provider, upstream, streaming, settings.Mode == "auto")
+}
+
+// selectProvider resolves the provider named by ProviderHeader, else the
+// default, and its upstream for the request's route. A provider the caller
+// names explicitly must exist and serve the route, in every mode, so a typo
+// fails fast instead of silently replaying or forwarding elsewhere. The
+// default provider may lack the route: replay still works, and forwarding
+// reports upstream_not_configured. ok is false once an error is written.
+func (h *handler) selectProvider(w http.ResponseWriter, r *http.Request) (name string, upstream Upstream, ok bool) {
+	name = strings.ToLower(strings.TrimSpace(r.Header.Get(ProviderHeader)))
+	if name == "" {
+		name = h.defaultProvider
+		return name, h.providers[name][r.URL.Path], true
+	}
+	routes, known := h.providers[name]
+	if !known {
+		writeError(w, 400, "unknown_provider", fmt.Sprintf("%s names no configured provider", ProviderHeader))
+		return "", Upstream{}, false
+	}
+	if upstream, ok = routes[r.URL.Path]; !ok {
+		writeError(w, 400, "provider_route_not_configured", fmt.Sprintf("provider %s is not configured for %s", name, r.URL.Path))
+		return "", Upstream{}, false
+	}
+	return name, upstream, true
 }
 
 func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Entry, s model.Settings) (*int64, error) {
@@ -258,7 +297,7 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 	return first, nil
 }
 
-func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, canonical []byte, key string, collectionID int64, upstream Upstream, identity string, streaming bool, cacheMiss bool) {
+func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, canonical []byte, key string, collectionID int64, provider string, upstream Upstream, streaming bool, cacheMiss bool) {
 	requestStarted := h.clock.Now()
 	var firstEvent *int64
 	history := func(outcome, detail string, recordingID, revisionID int64) {
@@ -267,7 +306,7 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		if cacheMiss {
 			cacheStatus = "miss"
 		}
-		h.addHistory(r.Context(), model.History{CollectionID: collectionID, Route: r.URL.Path, Key: key, Request: clone(original), Outcome: outcome, Detail: detail, RecordingID: recordingID, RevisionID: revisionID, Source: "upstream", CacheStatus: cacheStatus, DurationMS: &duration, FirstEventMS: firstEvent})
+		h.addHistory(r.Context(), model.History{CollectionID: collectionID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(original), Outcome: outcome, Detail: detail, RecordingID: recordingID, RevisionID: revisionID, Source: "upstream", CacheStatus: cacheStatus, DurationMS: &duration, FirstEventMS: firstEvent})
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.URL, bytes.NewReader(original))
 	if err != nil {
@@ -436,7 +475,7 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		history("interrupted", err.Error(), 0, 0)
 		return
 	}
-	recording := model.Recording{CollectionID: collectionID, Key: key, Route: r.URL.Path, Request: clone(original), MatchingInput: clone(canonical), UpstreamIdentity: identity, Streaming: streaming}
+	recording := model.Recording{CollectionID: collectionID, Key: key, Route: r.URL.Path, Request: clone(original), MatchingInput: clone(canonical), Streaming: streaming}
 	entry, err := h.db.Publish(publishCtx, recording, revision)
 	if err != nil {
 		outcome := "error"
@@ -662,37 +701,6 @@ func scaledDelay(deltaMS int64, multiplier float64) time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(nanos)
-}
-
-func upstreamIdentity(u Upstream) string {
-	type pair struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	}
-	pairs := make([]pair, 0, len(u.Headers))
-	for key, value := range u.Headers {
-		lower := strings.ToLower(key)
-		if !secretHeader(lower) {
-			pairs = append(pairs, pair{lower, value})
-		}
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Name < pairs[j].Name })
-	encoded, _ := json.Marshal(struct {
-		Version  int    `json:"version"`
-		URL      string `json:"url"`
-		Identity string `json:"identity"`
-		Headers  []pair `json:"headers"`
-	}{1, u.URL, u.Identity, pairs})
-	return string(encoded)
-}
-
-func secretHeader(lower string) bool {
-	switch strings.ToLower(lower) {
-	case "authorization", "proxy-authorization", "x-api-key", "api-key", "x-goog-api-key", "cookie", "set-cookie":
-		return true
-	default:
-		return false
-	}
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

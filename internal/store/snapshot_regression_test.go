@@ -54,11 +54,11 @@ func publishOne(t *testing.T, s *Store, rec model.Recording, rev model.Revision)
 
 func chatRecording(cid int64) model.Recording {
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
-	key, input, err := matching.Key("/v1/chat/completions", "test", req, nil)
+	key, input, err := matching.Key("/v1/chat/completions", req, nil)
 	if err != nil {
 		panic(err)
 	}
-	return model.Recording{CollectionID: cid, Key: key, Route: "/v1/chat/completions", Request: req, MatchingInput: input, UpstreamIdentity: "test"}
+	return model.Recording{CollectionID: cid, Key: key, Route: "/v1/chat/completions", Request: req, MatchingInput: input}
 }
 
 func chatRevision() model.Revision {
@@ -126,7 +126,7 @@ func TestImportFailsOnSourceIterationErrors(t *testing.T) {
 		{"recordings", func(t *testing.T, s *Store, cid int64) {
 			publishOne(t, s, testRecording(cid, "a"), testRevision("resp_a", "recorded"))
 			publishOne(t, s, testRecording(cid, "b"), testRevision("resp_b", "recorded"))
-		}, failingView("recordings", "id,collection_id,key,route,upstream_identity,streaming,active_revision_id", "created_at")},
+		}, failingView("recordings", "id,collection_id,key,route,streaming,active_revision_id", "created_at")},
 		{"revisions", func(t *testing.T, s *Store, cid int64) {
 			first := publishOne(t, s, testRecording(cid, "a"), testRevision("resp_a", "recorded"))
 			publishOne(t, s, testRecording(cid, "a"), testRevision("resp_a2", "edited"))

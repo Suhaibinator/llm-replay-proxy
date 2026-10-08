@@ -154,6 +154,7 @@ const Row = memo(function Row({
   const model = r?.model || "";
   const meta = [
     shortRoute(h.route),
+    h.provider && `via ${h.provider}`,
     h.source,
     r && count(r.items, "item"),
     r?.tool_calls ? count(r.tool_calls, "tool call") : "",

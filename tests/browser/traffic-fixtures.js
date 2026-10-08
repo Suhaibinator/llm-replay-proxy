@@ -116,6 +116,7 @@ function historyRow(r, id, createdAt) {
     duration_ms: duration,
     first_event_ms: first,
     lookup_outcome: replay ? "hit" : "miss",
+    provider: "openrouter",
   };
 }
 
@@ -185,7 +186,6 @@ function makeRecordings(count, now = Date.now(), seed = 3) {
       collection_id: 1,
       key: hex(r, 64),
       route: pick(r, ROUTES),
-      upstream_identity: "openrouter",
       streaming: r() < 0.7,
       active_revision_id: id * 10 + revisions,
       created_at: new Date(created).toISOString(),

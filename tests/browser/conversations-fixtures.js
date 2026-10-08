@@ -335,6 +335,7 @@ function historyItem(t) {
     duration_ms: t.duration_ms,
     first_event_ms: t.first_event_ms,
     lookup_outcome: t.lookup_outcome,
+    provider: "openrouter",
   };
 }
 
@@ -517,6 +518,7 @@ async function mockAPI(page) {
         series: [],
         models: [],
         routes: [],
+        providers: [],
         latency: { upstream: latency, replay: latency },
         top_recordings: [],
         top_threads: threads.slice(0, 3),

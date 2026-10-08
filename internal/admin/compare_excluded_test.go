@@ -17,7 +17,7 @@ func TestCompareMarksExcludedDifferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := []byte(`{"model":"m","metadata":{"run":"a"},"messages":[{"role":"user","content":"hi","name":"x"}]}`)
-	key, input, err := match.Key("/v1/chat/completions", "", req, c.Exclusions)
+	key, input, err := match.Key("/v1/chat/completions", req, c.Exclusions)
 	if err != nil {
 		t.Fatal(err)
 	}

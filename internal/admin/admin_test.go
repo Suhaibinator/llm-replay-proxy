@@ -113,7 +113,7 @@ func publishFixture(t *testing.T, db *store.Store) model.Entry {
 		t.Fatal(err)
 	}
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"old"}],"large":9007199254740993123456789}`)
-	key, canonical, err := match.Key("/v1/chat/completions", "", req, nil)
+	key, canonical, err := match.Key("/v1/chat/completions", req, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

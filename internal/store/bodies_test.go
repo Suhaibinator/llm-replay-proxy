@@ -108,11 +108,11 @@ func TestGrowingConversationStoresEachTurnOnce(t *testing.T) {
 	var raw int
 	for _, req := range requests {
 		raw += len(req)
-		key, _, err := matching.Key("/v1/responses", "test", req, nil)
+		key, _, err := matching.Key("/v1/responses", req, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec := model.Recording{CollectionID: settings.ActiveCollectionID, Key: key, Route: "/v1/responses", Request: req, UpstreamIdentity: "test", Streaming: true}
+		rec := model.Recording{CollectionID: settings.ActiveCollectionID, Key: key, Route: "/v1/responses", Request: req, Streaming: true}
 		publishOne(t, s, rec, testRevision("resp", "recorded"))
 		// The caller's own log of the same call adds no request bytes.
 		if err = s.AddHistory(ctx, model.History{CollectionID: settings.ActiveCollectionID, Route: "/v1/responses", Key: key, Request: req, Outcome: "recorded"}); err != nil {

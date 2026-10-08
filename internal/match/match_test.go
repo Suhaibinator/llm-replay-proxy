@@ -9,11 +9,11 @@ import (
 func TestKeyCanonicalAndSensitiveInputs(t *testing.T) {
 	bodyA := []byte(`{"model":"m","n":9007199254740993123456789,"stream":true,"messages":[{"content":"hi"}]}`)
 	bodyB := []byte(" { \"messages\" : [ { \"content\" : \"hi\" } ], \"stream\":true, \"n\":9007199254740993123456789, \"model\":\"m\" } ")
-	keyA, canonicalA, err := Key("/v1/chat/completions", "provider-a", bodyA, nil)
+	keyA, canonicalA, err := Key("/v1/chat/completions", bodyA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyB, canonicalB, err := Key("/v1/chat/completions", "provider-a", bodyB, nil)
+	keyB, canonicalB, err := Key("/v1/chat/completions", bodyB, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,12 +23,13 @@ func TestKeyCanonicalAndSensitiveInputs(t *testing.T) {
 	if !strings.Contains(string(canonicalA), "9007199254740993123456789") {
 		t.Fatalf("numeric precision lost: %s", canonicalA)
 	}
-	for _, change := range []struct{ route, identity, body string }{
-		{"/v1/responses", "provider-a", string(bodyA)},
-		{"/v1/chat/completions", "provider-b", string(bodyA)},
-		{"/v1/chat/completions", "provider-a", strings.Replace(string(bodyA), `"stream":true`, `"stream":false`, 1)},
+	for _, change := range []struct{ route, body string }{
+		{"/v1/responses", string(bodyA)},
+		{"/v1/messages", string(bodyA)},
+		{"/v1/chat/completions", strings.Replace(string(bodyA), `"stream":true`, `"stream":false`, 1)},
+		{"/v1/chat/completions", strings.Replace(string(bodyA), `"model":"m"`, `"model":"other"`, 1)},
 	} {
-		got, _, err := Key(change.route, change.identity, []byte(change.body), nil)
+		got, _, err := Key(change.route, []byte(change.body), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -38,29 +39,33 @@ func TestKeyCanonicalAndSensitiveInputs(t *testing.T) {
 	}
 	var envelope struct {
 		Version int            `json:"version"`
+		API     string         `json:"api"`
 		Body    map[string]any `json:"body"`
 	}
 	if err := json.Unmarshal(canonicalA, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Version != canonicalVersion {
-		t.Errorf("version = %d", envelope.Version)
+	if envelope.Version != canonicalVersion || envelope.API != "chat_completions" {
+		t.Errorf("envelope = %d %q", envelope.Version, envelope.API)
+	}
+	if _, _, err := Key("/v1/embeddings", bodyA, nil); err == nil {
+		t.Error("unsupported route accepted")
 	}
 }
 
 func TestCanonicalNumbersPreserveExactLexeme(t *testing.T) {
-	a, _, err := Key("/v1/responses", "p", []byte(`{"n":1}`), nil)
+	a, _, err := Key("/v1/responses", []byte(`{"n":1}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := Key("/v1/responses", "p", []byte(`{"n":1.0}`), nil)
+	b, _, err := Key("/v1/responses", []byte(`{"n":1.0}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a == b {
 		t.Fatal("distinct numeric inputs collapsed")
 	}
-	_, canonical, err := Key("/v1/responses", "p", []byte(`{"tiny":123456789012345678901234567890e-999999999999999999999}`), nil)
+	_, canonical, err := Key("/v1/responses", []byte(`{"tiny":123456789012345678901234567890e-999999999999999999999}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,11 +78,11 @@ func TestKeyExclusions(t *testing.T) {
 	a := []byte(`{"metadata":{"trace/id":"one","til~de":1},"items":[{"id":1},{"id":2}],"stream":false}`)
 	b := []byte(`{"metadata":{"trace/id":"two","til~de":9},"items":[{"id":99},{"id":2}],"stream":false}`)
 	exclusions := []string{"/metadata/trace~1id", "/metadata/til~0de", "/items/0/id"}
-	ka, ca, err := Key("/v1/responses", "p", a, exclusions)
+	ka, ca, err := Key("/v1/responses", a, exclusions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kb, cb, err := Key("/v1/responses", "p", b, exclusions)
+	kb, cb, err := Key("/v1/responses", b, exclusions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +91,7 @@ func TestKeyExclusions(t *testing.T) {
 	}
 
 	// A missing path is explicitly a no-op.
-	kc, _, err := Key("/v1/responses", "p", a, append(exclusions, "/missing/path"))
+	kc, _, err := Key("/v1/responses", a, append(exclusions, "/missing/path"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,14 +101,14 @@ func TestKeyExclusions(t *testing.T) {
 }
 
 func TestArrayElementExclusion(t *testing.T) {
-	_, canonical, err := Key("/v1/messages", "p", []byte(`{"stream":false,"a":[0,1,2,3]}`), []string{"/a/1", "/a/2"})
+	_, canonical, err := Key("/v1/messages", []byte(`{"stream":false,"a":[0,1,2,3]}`), []string{"/a/1", "/a/2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(canonical), `"a":[0,3]`) {
 		t.Fatalf("array items not removed: %s", canonical)
 	}
-	_, reverse, err := Key("/v1/messages", "p", []byte(`{"stream":false,"a":[0,1,2,3]}`), []string{"/a/2", "/a/1"})
+	_, reverse, err := Key("/v1/messages", []byte(`{"stream":false,"a":[0,1,2,3]}`), []string{"/a/2", "/a/1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +118,11 @@ func TestArrayElementExclusion(t *testing.T) {
 }
 
 func TestEmptyArrayIsDistinctFromNull(t *testing.T) {
-	empty, emptyInput, err := Key("/v1/responses", "p", []byte(`{"tools":[]}`), nil)
+	empty, emptyInput, err := Key("/v1/responses", []byte(`{"tools":[]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	null, _, err := Key("/v1/responses", "p", []byte(`{"tools":null}`), nil)
+	null, _, err := Key("/v1/responses", []byte(`{"tools":null}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +132,7 @@ func TestEmptyArrayIsDistinctFromNull(t *testing.T) {
 	if !strings.Contains(string(emptyInput), `"tools":[]`) {
 		t.Fatalf("empty array not preserved: %s", emptyInput)
 	}
-	_, nestedInput, err := Key("/v1/responses", "p", []byte(`{"a":[[],{"b":[]}]}`), nil)
+	_, nestedInput, err := Key("/v1/responses", []byte(`{"a":[[],{"b":[]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +141,11 @@ func TestEmptyArrayIsDistinctFromNull(t *testing.T) {
 	}
 	// Removing every element by exclusion and sending an empty array produce
 	// the same matching input.
-	excluded, excludedInput, err := Key("/v1/responses", "p", []byte(`{"tools":["x"]}`), []string{"/tools/0"})
+	excluded, excludedInput, err := Key("/v1/responses", []byte(`{"tools":["x"]}`), []string{"/tools/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	alreadyEmpty, _, err := Key("/v1/responses", "p", []byte(`{"tools":[]}`), []string{"/tools/0"})
+	alreadyEmpty, _, err := Key("/v1/responses", []byte(`{"tools":[]}`), []string{"/tools/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,11 +168,11 @@ func TestValidateExclusions(t *testing.T) {
 
 func TestInvalidJSON(t *testing.T) {
 	for _, body := range []string{"", "{", "{} {}", `[]`, `{"x":1,"x":2}`, `{"x":"\ud800"}`, `{"x":"\udc00"}`} {
-		if _, _, err := Key("/v1/responses", "p", []byte(body), nil); err == nil {
+		if _, _, err := Key("/v1/responses", []byte(body), nil); err == nil {
 			t.Errorf("Key accepted %q", body)
 		}
 	}
-	if _, _, err := Key("", "p", []byte(`{}`), nil); err == nil {
+	if _, _, err := Key("", []byte(`{}`), nil); err == nil {
 		t.Error("empty route accepted")
 	}
 }

@@ -42,7 +42,7 @@ func sqliteFileURL(path string) string { return (&url.URL{Scheme: "file", Path: 
 
 // schemaVersion is stored in PRAGMA user_version. A database or snapshot in
 // any other format is refused rather than migrated.
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schema = `
 PRAGMA foreign_keys=ON;
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS bodies (
 );
 CREATE TABLE IF NOT EXISTS recordings (
  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
- key TEXT NOT NULL, route TEXT NOT NULL, upstream_identity TEXT NOT NULL, streaming INTEGER NOT NULL,
+ key TEXT NOT NULL, route TEXT NOT NULL, streaming INTEGER NOT NULL,
  active_revision_id INTEGER, created_at TEXT NOT NULL, UNIQUE(collection_id,key)
 );
 CREATE TABLE IF NOT EXISTS revisions (
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS history (
  route TEXT NOT NULL, key TEXT NOT NULL, request_body INTEGER REFERENCES bodies(id), outcome TEXT NOT NULL,
  detail TEXT NOT NULL, recording_id INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
  source TEXT NOT NULL DEFAULT '', duration_ms INTEGER, first_event_ms INTEGER,
- lookup_outcome TEXT NOT NULL DEFAULT '', revision_id INTEGER
+ lookup_outcome TEXT NOT NULL DEFAULT '', revision_id INTEGER, provider TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS history_collection_created ON history(collection_id,id DESC);
 CREATE INDEX IF NOT EXISTS revisions_recording ON revisions(recording_id,id DESC);
@@ -271,13 +271,13 @@ func (s *Store) SetSettings(ctx context.Context, v model.Settings) error {
 	return nil
 }
 
-const recordingCols = "id,collection_id,key,route,upstream_identity,streaming,active_revision_id,created_at"
+const recordingCols = "id,collection_id,key,route,streaming,active_revision_id,created_at"
 
 func scanRecording(row interface{ Scan(...any) error }) (model.Recording, error) {
 	var r model.Recording
 	var stream int
 	var active sql.NullInt64
-	err := row.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &r.UpstreamIdentity, &stream, &active, &r.CreatedAt)
+	err := row.Scan(&r.ID, &r.CollectionID, &r.Key, &r.Route, &stream, &active, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}
@@ -354,7 +354,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if err != nil {
 		return model.Entry{}, err
 	}
-	key, input, err := matching.Key(rec.Route, rec.UpstreamIdentity, rec.Request, collection.Exclusions)
+	key, input, err := matching.Key(rec.Route, rec.Request, collection.Exclusions)
 	if err != nil {
 		return model.Entry{}, err
 	}
@@ -377,7 +377,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	// skip the second pass when the revision carries the same bytes.
 	vkey, vinput := key, input
 	if !bytes.Equal(rev.Request, rec.Request) {
-		if vkey, vinput, err = matching.Key(rec.Route, rec.UpstreamIdentity, rev.Request, collection.Exclusions); err != nil {
+		if vkey, vinput, err = matching.Key(rec.Route, rev.Request, collection.Exclusions); err != nil {
 			return model.Entry{}, errors.New("revision provenance does not match recording key")
 		}
 	}
@@ -412,7 +412,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 			return model.Entry{}, ErrConflict
 		}
 		rec.CreatedAt = at
-		res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, rec.UpstreamIdentity, rec.Streaming, rec.CreatedAt)
+		res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,streaming,created_at) VALUES(?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, rec.Streaming, rec.CreatedAt)
 		if e != nil {
 			return model.Entry{}, e
 		}
@@ -454,9 +454,9 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 
 // derived recomputes matching input for display; it is never stored.
 type derived struct {
-	route, identity string
-	exclusions      []string
-	inputs          map[string]json.RawMessage
+	route      string
+	exclusions []string
+	inputs     map[string]json.RawMessage
 }
 
 func (s *Store) derivation(ctx context.Context, r model.Recording) (*derived, error) {
@@ -464,14 +464,14 @@ func (s *Store) derivation(ctx context.Context, r model.Recording) (*derived, er
 	if err != nil {
 		return nil, err
 	}
-	return &derived{route: r.Route, identity: r.UpstreamIdentity, exclusions: c.Exclusions, inputs: map[string]json.RawMessage{}}, nil
+	return &derived{route: r.Route, exclusions: c.Exclusions, inputs: map[string]json.RawMessage{}}, nil
 }
 
 func (d *derived) input(request json.RawMessage) (json.RawMessage, error) {
 	if in, ok := d.inputs[string(request)]; ok {
 		return in, nil
 	}
-	_, in, err := matching.Key(d.route, d.identity, request, d.exclusions)
+	_, in, err := matching.Key(d.route, request, d.exclusions)
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +596,7 @@ func (s *Store) AddHistory(ctx context.Context, h model.History) error {
 		body.Valid = true
 	}
 	revision := sql.NullInt64{Int64: h.RevisionID, Valid: h.RevisionID != 0}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,revision_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, body, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus, revision); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,revision_id,provider) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, body, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus, revision, h.Provider); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1015,7 +1015,7 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 		out = append(out, item.c)
 		for _, loaded := range item.recordings {
 			r := loaded.r
-			res, e = tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,upstream_identity,streaming,created_at) VALUES(?,?,?,?,?,?)`, newCID, r.Key, r.Route, r.UpstreamIdentity, r.Streaming, r.CreatedAt)
+			res, e = tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,streaming,created_at) VALUES(?,?,?,?,?)`, newCID, r.Key, r.Route, r.Streaming, r.CreatedAt)
 			if e != nil {
 				return nil, e
 			}
@@ -1228,7 +1228,7 @@ func readSnapshotRevisions(ctx context.Context, src *sql.DB, r *model.Recording,
 		}
 		key, seen := keys[bodyIDs[i].Int64]
 		if !seen {
-			if key, _, err = matching.Key(r.Route, r.UpstreamIdentity, v.Request, exclusions); err != nil {
+			if key, _, err = matching.Key(r.Route, v.Request, exclusions); err != nil {
 				return nil, fmt.Errorf("revision request: %w", err)
 			}
 			keys[bodyIDs[i].Int64] = key

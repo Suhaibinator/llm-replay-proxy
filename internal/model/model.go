@@ -21,7 +21,6 @@ type Recording struct {
 	// once, as exact text, by the endpoints that need them.
 	Request          json.RawMessage `json:"-"`
 	MatchingInput    json.RawMessage `json:"-"`
-	UpstreamIdentity string          `json:"upstream_identity"`
 	Streaming        bool            `json:"streaming"`
 	ActiveRevisionID int64           `json:"active_revision_id"`
 	CreatedAt        string          `json:"created_at"`
@@ -100,11 +99,14 @@ type Entry struct {
 	Revision  Revision  `json:"revision"`
 }
 type History struct {
-	ID           int64           `json:"id"`
-	CollectionID int64           `json:"collection_id"`
-	Route        string          `json:"route"`
-	Key          string          `json:"key"`
-	Request      json.RawMessage `json:"-"`
+	ID           int64  `json:"id"`
+	CollectionID int64  `json:"collection_id"`
+	Route        string `json:"route"`
+	// Provider names the configured upstream provider the request selected
+	// (explicitly or by default); empty when none could be resolved.
+	Provider string          `json:"provider"`
+	Key      string          `json:"key"`
+	Request  json.RawMessage `json:"-"`
 	// Summary describes Request; nil when the call had no request body.
 	Summary     *RequestSummary `json:"request"`
 	Outcome     string          `json:"outcome"`

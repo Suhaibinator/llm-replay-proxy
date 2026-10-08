@@ -20,7 +20,6 @@ const rec = (id, over = {}, response = {}) => ({
   collection_id: 1,
   key: `k${id}`,
   route: "/v1/responses",
-  upstream_identity: "x",
   streaming: true,
   active_revision_id: id,
   created_at: `2026-10-0${id}T00:00:00Z`,

@@ -56,16 +56,24 @@ revision on a hit, the published revision on `recorded`; null for every other
 outcome (including an interrupted replay). Token and cost attribution uses that
 revision, never whatever is active later. Deleting a recording clears the link
 (its revisions are gone), so those rows no longer carry tokens. Storage format
-is 4: revisions also store their response summary, and request bodies store
-their summary version and `thread` in indexed columns.
+is 5: revisions also store their response summary, request bodies store
+their summary version and `thread` in indexed columns, and history rows store
+the `provider` the request selected (empty when none was resolved).
 
-## `GET /api/insights?collection_id=N&from=RFC3339&to=RFC3339[&model=M]`
+## `GET /api/history?collection_id=N[&after_id=I][&limit=L][&provider=P]`
+
+`provider` keeps only rows that selected that provider; `unknown` selects rows
+without one, as the insights breakdown names them. Each row carries `provider`.
+
+## `GET /api/insights?collection_id=N&from=RFC3339&to=RFC3339[&model=M][&provider=P]`
 
 Returns `Insights`. Same range rules as `/api/analytics` (default last 24 h,
 half-open, at most 366 days; hourly buckets through 48 h, daily beyond; buckets
 start at the UTC hour or day containing `from`, so the first and last can be
 partial). `model` filters every section to one model (exact match on the
-attributed model). 404 for an unknown collection.
+attributed model); `provider` filters every section to one provider (exact
+match on `providers[].provider`, so `unknown` selects rows without one). The
+two filters combine. 404 for an unknown collection.
 
 - Outcomes: `hits` = outcome `hit`; `misses` = `miss`; `recorded`;
   `interrupted`; `errors` = `error` + `incomplete`; `requests` = all rows.
@@ -74,15 +82,17 @@ attributed model). 404 for an unknown collection.
   `miss`), whatever happened after the lookup. An interrupted replay still
   hit; an Auto-mode miss whose upstream call failed still missed; Record mode
   (`bypass`) is no lookup. Null when there were no lookups. This is the same
-  rate `/api/analytics` reports. Each `series` bucket and each `models` and
-  `routes` row has its own `hit_rate` with the same definition over its rows,
+  rate `/api/analytics` reports. Each `series` bucket and each `models`,
+  `routes` and `providers` row has its own `hit_rate` with the same definition over its rows,
   so the outcome counts alone do not reproduce it.
 - `upstream_tokens` / `upstream_cost`: summed over `recorded` rows' revisions.
   `replayed_tokens` / `saved_cost`: summed over `hit` rows' revisions (what
   replay avoided paying for). Token fields sum only reported counts (0 when
   none). Costs are null when no row in the set reported one.
 - Model attribution: response summary `model`, else request summary `model`,
-  else `"unknown"`. `models` and `routes` are sorted by `requests`, descending.
+  else `"unknown"`. Provider attribution: the history row's `provider`, else
+  `"unknown"`. `models`, `routes` and `providers` are sorted by `requests`,
+  descending.
 - `latency`: `upstream` from rows with source `upstream`, `replay` from source
   `replay`. `histogram` (durations) and `first_event_histogram` (first-event
   times) count samples **per bucket**, not cumulatively: a bucket counts
@@ -166,7 +176,7 @@ Then serve it (`auth.disabled` is allowed on loopback listeners):
 
 ```sh
 cat > dev-config.json <<'EOF'
-{"listen": "127.0.0.1:8080", "database": "dev.sqlite", "auth": {"disabled": true}, "upstreams": {}}
+{"listen": "127.0.0.1:8080", "database": "dev.sqlite", "auth": {"disabled": true}}
 EOF
 go run ./cmd/replay-proxy -config dev-config.json
 ```

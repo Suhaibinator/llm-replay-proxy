@@ -22,7 +22,7 @@ export function parseHash(hash: string): Route {
   const view = isView(path) ? path : "overview";
   const q = new URLSearchParams(query);
   const route: Route = { view };
-  for (const key of ["thread", "model", "outcome"] as const) {
+  for (const key of ["thread", "model", "provider", "outcome"] as const) {
     const v = q.get(key);
     if (v) route[key] = v;
   }
@@ -35,7 +35,7 @@ export function parseHash(hash: string): Route {
 
 export function formatHash(route: Route): string {
   const q = new URLSearchParams();
-  for (const key of ["thread", "model", "outcome"] as const)
+  for (const key of ["thread", "model", "provider", "outcome"] as const)
     if (route[key]) q.set(key, route[key]!);
   for (const key of ["recording", "history"] as const)
     if (route[key]) q.set(key, String(route[key]));
