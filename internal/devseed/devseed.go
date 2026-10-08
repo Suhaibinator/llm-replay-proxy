@@ -62,6 +62,19 @@ type profile struct {
 	weight            int
 }
 
+// provider names the upstream provider a profile's calls are attributed to:
+// OpenRouter for its vendor/model names, else the route's first-party API.
+func (p profile) provider() string {
+	switch {
+	case strings.Contains(p.model, "/"):
+		return "openrouter"
+	case p.route == messagesRoute:
+		return "anthropic"
+	default:
+		return "openai"
+	}
+}
+
 var profiles = []profile{
 	{route: chatRoute, model: "gpt-4.1-mini", streamShare: .6, toolShare: .2, latencyMS: 900, weight: 5},
 	{route: chatRoute, model: "openai/o4-mini", reasoning: true, streamShare: .7, toolShare: .15, priceIn: 1.1, priceOut: 4.4, latencyMS: 6000, weight: 2},
@@ -333,7 +346,7 @@ func (s *seeder) conversation(ctx context.Context) error {
 	// Recent days are busier, so the series has a visible trend.
 	start := s.opt.Now.Add(-time.Duration(math.Pow(s.r.Float64(), 1.6) * float64(span)))
 	turns := 1 + int(math.Min(9, s.r.ExpFloat64()*2.2))
-	identity := fmt.Sprintf(`{"version":1,"url":"https://upstream.example%s","identity":"","headers":[]}`, p.route)
+	provider := p.provider()
 	var past []turn
 	var prevIn int64
 	now := start
@@ -345,7 +358,7 @@ func (s *seeder) conversation(ctx context.Context) error {
 			user = followUps[s.r.IntN(len(followUps))]
 		}
 		req := request(p, system, past, user, streaming)
-		key, _, err := match.Key(p.route, identity, req, nil)
+		key, _, err := match.Key(p.route, req, nil)
 		if err != nil {
 			return err
 		}
@@ -359,7 +372,7 @@ func (s *seeder) conversation(ctx context.Context) error {
 			}
 			first = &v
 		}
-		row := model.History{CollectionID: s.cid, Route: p.route, Key: key, Request: req, Source: "upstream", CacheStatus: "miss", DurationMS: &duration, FirstEventMS: first, CreatedAt: s.at(now)}
+		row := model.History{CollectionID: s.cid, Route: p.route, Provider: provider, Key: key, Request: req, Source: "upstream", CacheStatus: "miss", DurationMS: &duration, FirstEventMS: first, CreatedAt: s.at(now)}
 		if s.r.Float64() < .2 {
 			row.CacheStatus = "bypass" // recorded in record mode
 		}
@@ -375,7 +388,7 @@ func (s *seeder) conversation(ctx context.Context) error {
 		case roll < .135 && streaming:
 			row.Outcome, row.Detail = "incomplete", "stream ended before its terminal event"
 		default:
-			if err := s.record(ctx, p, streaming, identity, key, req, r, duration, first, row, now); err != nil {
+			if err := s.record(ctx, p, streaming, key, req, r, duration, first, row, now); err != nil {
 				return err
 			}
 		}
@@ -391,12 +404,12 @@ func (s *seeder) conversation(ctx context.Context) error {
 
 // record publishes a turn's response, logs the upstream call and its later
 // replays, and occasionally an edit or a near-miss variant of the request.
-func (s *seeder) record(ctx context.Context, p profile, streaming bool, identity, key string, req []byte, r reply, duration int64, first *int64, row model.History, at time.Time) error {
+func (s *seeder) record(ctx context.Context, p profile, streaming bool, key string, req []byte, r reply, duration int64, first *int64, row model.History, at time.Time) error {
 	firstMS := int64(0)
 	if first != nil {
 		firstMS = *first
 	}
-	rec := model.Recording{CollectionID: s.cid, Key: key, Route: p.route, Request: req, UpstreamIdentity: identity, Streaming: streaming}
+	rec := model.Recording{CollectionID: s.cid, Key: key, Route: p.route, Request: req, Streaming: streaming}
 	// Recordings date from the call that recorded them, not from seeding.
 	entry, err := s.db.PublishAt(ctx, rec, revision(p.route, streaming, r, firstMS, duration), at)
 	if err != nil {
@@ -446,7 +459,7 @@ func (s *seeder) record(ctx context.Context, p profile, streaming bool, identity
 			v := s.lognormal(8, .7)
 			fe = &v
 		}
-		hit := model.History{CollectionID: s.cid, Route: p.route, Key: key, Request: req, Outcome: "hit", CacheStatus: "hit", Source: "replay",
+		hit := model.History{CollectionID: s.cid, Route: p.route, Provider: p.provider(), Key: key, Request: req, Outcome: "hit", CacheStatus: "hit", Source: "replay",
 			RecordingID: entry.Recording.ID, RevisionID: served, DurationMS: &d, FirstEventMS: fe, CreatedAt: s.at(when)}
 		if s.r.Float64() < .03 {
 			hit.Outcome, hit.RevisionID, hit.Detail = "interrupted", 0, "client connection closed: write: broken pipe"
@@ -460,12 +473,12 @@ func (s *seeder) record(ctx context.Context, p profile, streaming bool, identity
 		_ = json.Unmarshal(req, &body)
 		body["temperature"] = math.Round(s.r.Float64()*10) / 10
 		variant, _ := json.Marshal(body)
-		vkey, _, err := match.Key(p.route, identity, variant, nil)
+		vkey, _, err := match.Key(p.route, variant, nil)
 		if err != nil {
 			return err
 		}
 		when := at.Add(time.Duration(s.r.Float64() * float64(remaining)))
-		s.rows = append(s.rows, model.History{CollectionID: s.cid, Route: p.route, Key: vkey, Request: variant, Outcome: "miss", CacheStatus: "miss",
+		s.rows = append(s.rows, model.History{CollectionID: s.cid, Route: p.route, Provider: p.provider(), Key: vkey, Request: variant, Outcome: "miss", CacheStatus: "miss",
 			Source: "proxy", Detail: "replay mode", CreatedAt: s.at(when)})
 	}
 	return nil

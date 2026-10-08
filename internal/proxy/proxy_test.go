@@ -144,22 +144,98 @@ type flushRecorder struct {
 
 func (w *flushRecorder) Flush() { w.flushes++; w.ResponseRecorder.Flush() }
 
-func TestUpstreamIdentityIsStableAndExcludesCredentials(t *testing.T) {
-	a := upstreamIdentity(Upstream{URL: "https://example/v1", Identity: "model=x", APIKey: "secret", Headers: map[string]string{
-		"X-Tenant": "one", "Authorization": "Bearer also-secret", "X-Mode": "fast",
+func TestProviderHeaderSelectsUpstreamButNotMatching(t *testing.T) {
+	const chat = "/v1/chat/completions"
+	reply := `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	var hosts, keys []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hosts, keys = append(hosts, r.URL.Host), append(keys, r.Header.Get("Authorization"))
+		if r.Header.Get(ProviderHeader) != "" || r.Header.Get("X-Tier") != map[string]string{"openai.invalid": "", "router.invalid": "fast"}[r.URL.Host] {
+			t.Errorf("unexpected upstream headers %v", r.Header)
+		}
+		return response(reply, "application/json"), nil
+	})}
+	db := openTestStore(t, "auto")
+	h := New(db, Config{Client: client, DefaultProvider: "openai", Providers: map[string]map[string]Upstream{
+		"openai":     {chat: {URL: "https://openai.invalid/v1/chat/completions", APIKey: "openai-key"}, "/v1/responses": {URL: "https://openai.invalid/v1/responses"}},
+		"openrouter": {chat: {URL: "https://router.invalid/api/v1/chat/completions", APIKey: "router-key", Headers: map[string]string{"x-tier": "fast"}}},
 	}})
-	b := upstreamIdentity(Upstream{URL: "https://example/v1", Identity: "model=x", APIKey: "different", Headers: map[string]string{
-		"x-mode": "fast", "x-tenant": "one", "X-Api-Key": "hidden",
-	}})
-	if a != b {
-		t.Fatalf("identity depends on map order, spelling, or credentials:\n%q\n%q", a, b)
+	send := func(provider, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, chat, strings.NewReader(body))
+		if provider != "" {
+			r.Header.Set(ProviderHeader, provider)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
 	}
-	if a == upstreamIdentity(Upstream{URL: "https://other/v1", Identity: "model=x", Headers: map[string]string{"x-mode": "fast", "x-tenant": "one"}}) {
-		t.Fatal("URL did not affect identity")
+
+	if w := send("", `{"model":"a","temperature":0}`); w.Code != 200 {
+		t.Fatalf("default provider: %d %s", w.Code, w.Body.String())
 	}
-	crafted := upstreamIdentity(Upstream{URL: "https://example/v1", Identity: "model=x\nx-mode:fast", Headers: map[string]string{"x-tenant": "one"}})
-	if crafted == a {
-		t.Fatal("structured identity collided with delimiter-like identity text")
+	if w := send(" OpenRouter ", `{"model":"b","temperature":0}`); w.Code != 200 {
+		t.Fatalf("named provider: %d %s", w.Code, w.Body.String())
+	}
+	if !reflect.DeepEqual(hosts, []string{"openai.invalid", "router.invalid"}) || !reflect.DeepEqual(keys, []string{"Bearer openai-key", "Bearer router-key"}) {
+		t.Fatalf("upstreams = %v %v", hosts, keys)
+	}
+	// The provider is not part of the key: a recording made through one
+	// provider replays for every other.
+	if w := send("openrouter", `{"model":"a","temperature":0}`); w.Code != 200 || w.Body.String() != reply {
+		t.Fatalf("cross-provider replay: %d %s", w.Code, w.Body.String())
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("cross-provider hit went upstream: %v", hosts)
+	}
+	// Any other parameter still distinguishes requests.
+	if w := send("openrouter", `{"model":"a","temperature":1}`); w.Code != 200 || len(hosts) != 3 {
+		t.Fatalf("changed temperature did not miss: %d %v", w.Code, hosts)
+	}
+	history, err := db.History(context.Background(), activeCollectionID(t, db), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var providers []string
+	for _, item := range history {
+		providers = append(providers, item.Provider+"/"+item.Outcome)
+	}
+	if want := []string{"openrouter/recorded", "openrouter/hit", "openrouter/recorded", "openai/recorded"}; !reflect.DeepEqual(providers, want) {
+		t.Fatalf("history providers = %v, want %v", providers, want)
+	}
+
+	// An explicitly named provider must exist and serve the route, even when
+	// replay alone could answer.
+	setMode(t, db, "replay")
+	for _, tc := range []struct{ provider, route, code string }{
+		{"missing", chat, "unknown_provider"},
+		{"openrouter", "/v1/responses", "provider_route_not_configured"},
+	} {
+		r := httptest.NewRequest(http.MethodPost, tc.route, strings.NewReader(`{"model":"a","temperature":0}`))
+		r.Header.Set(ProviderHeader, tc.provider)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.code) {
+			t.Fatalf("%s %s: %d %s", tc.provider, tc.route, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestReplayNeedsNoUpstreamButForwardingDoes(t *testing.T) {
+	const chat = "/v1/chat/completions"
+	reply := `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return response(reply, "application/json"), nil })}
+	db := openTestStore(t, "record")
+	recorder := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {chat: {URL: "https://upstream.invalid"}}}})
+	if w := perform(recorder, chat, `{"model":"a"}`); w.Code != 200 {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+	offline := New(db, Config{Client: client})
+	setMode(t, db, "auto")
+	if w := perform(offline, chat, `{"model":"a"}`); w.Code != 200 || w.Body.String() != reply {
+		t.Fatalf("offline replay: %d %s", w.Code, w.Body.String())
+	}
+	if w := perform(offline, chat, `{"model":"b"}`); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "upstream_not_configured") {
+		t.Fatalf("offline miss: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -186,7 +262,7 @@ func TestRecordThenReplayAllProtocolsAndTransports(t *testing.T) {
 				return response(tc.response, map[bool]string{true: "text/event-stream", false: "application/json"}[tc.stream]), nil
 			})}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{tc.route: {URL: "https://upstream.invalid", APIKey: "secret"}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {tc.route: {URL: "https://upstream.invalid", APIKey: "secret"}}}})
 			body := `{"model":"demo","stream":` + map[bool]string{true: "true", false: "false"}[tc.stream] + `}`
 			first := perform(h, tc.route, body)
 			if first.Code != 200 || first.Body.String() != tc.response {
@@ -212,7 +288,7 @@ func TestIncompleteStreamIsDeliveredButNeverPublished(t *testing.T) {
 		return response("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", "text/event-stream"), nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/chat/completions": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/chat/completions": {URL: "https://upstream.invalid"}}}})
 	recorded := perform(h, "/v1/chat/completions", `{"stream":true}`)
 	if !strings.Contains(recorded.Body.String(), "partial") {
 		t.Fatal("live partial response was not forwarded")
@@ -234,7 +310,7 @@ func TestProtocolSSEErrorEventsAreDeliveredButNeverPublished(t *testing.T) {
 		t.Run(tc.route, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return response(tc.body, "text/event-stream"), nil })}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{tc.route: {URL: "https://upstream.invalid"}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {tc.route: {URL: "https://upstream.invalid"}}}})
 			live := perform(h, tc.route, `{"stream":true}`)
 			if live.Code != 200 || live.Body.String() != tc.body {
 				t.Fatalf("live error event = %d %q", live.Code, live.Body.String())

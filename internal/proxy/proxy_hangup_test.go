@@ -58,7 +58,7 @@ func TestCallerHangupAfterStreamEnd(t *testing.T) {
 				return resp, nil
 			})}
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: client, Upstreams: map[string]Upstream{tc.route: {URL: "https://upstream.invalid"}}})
+			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {tc.route: {URL: "https://upstream.invalid"}}}})
 			if live := performWithContext(h, ctx, tc.route, request); live.Body.String() != tc.payload {
 				t.Fatalf("live body = %q", live.Body.String())
 			}
@@ -108,7 +108,7 @@ func TestCallerHangupBeforeTrailingUpstreamBytes(t *testing.T) {
 		return resp, nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	h.ServeHTTP(&pipeAfterDoneWriter{ResponseRecorder: httptest.NewRecorder()}, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if got := latestHistory(t, db); got.Outcome != "recorded" {
 		t.Fatalf("history = %+v", got)
@@ -143,7 +143,7 @@ func TestCallerHangupRacingUpstreamEOF(t *testing.T) {
 		return resp, nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	performWithContext(h, ctx, "/v1/responses", request)
 	if got := latestHistory(t, db); got.Outcome != "recorded" || got.Detail == "" {
 		t.Fatalf("history = %+v", got)

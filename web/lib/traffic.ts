@@ -85,6 +85,7 @@ export type TrafficFilter = {
   /** Selected outcomes; empty means all. */
   outcomes: string[];
   model: string;
+  provider: string;
   route: string;
   source: string;
   thread: string;
@@ -93,6 +94,7 @@ export type TrafficFilter = {
 export const emptyTrafficFilter: TrafficFilter = {
   outcomes: [],
   model: "",
+  provider: "",
   route: "",
   source: "",
   thread: "",
@@ -100,6 +102,8 @@ export const emptyTrafficFilter: TrafficFilter = {
 };
 
 export const rowModel = (h: History) => h.request?.model || "";
+/** The row's provider, named as the insights breakdown names it. */
+export const rowProvider = (h: History) => h.provider || "unknown";
 
 function matchesQuery(h: History, query: string) {
   const q = query.trim().toLowerCase();
@@ -110,6 +114,7 @@ function matchesQuery(h: History, query: string) {
     h.key,
     h.detail,
     h.route,
+    h.provider,
     String(h.id),
   ].some((v) => v && v.toLowerCase().includes(q));
 }
@@ -118,6 +123,7 @@ function matchesQuery(h: History, query: string) {
 function matchesFacets(h: History, f: TrafficFilter) {
   return (
     (!f.model || rowModel(h) === f.model) &&
+    (!f.provider || rowProvider(h) === f.provider) &&
     (!f.route || h.route === f.route) &&
     (!f.source || h.source === f.source) &&
     (!f.thread || h.request?.thread === f.thread) &&

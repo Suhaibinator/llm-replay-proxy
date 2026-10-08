@@ -27,19 +27,19 @@ func openTest(t *testing.T) *Store {
 
 func testRecording(cid int64, key string) model.Recording {
 	req := []byte(fmt.Sprintf(`{"model":"m","input":%q,"stream":true}`, key))
-	hash, input, err := matching.Key("/v1/responses", "test", req, nil)
+	hash, input, err := matching.Key("/v1/responses", req, nil)
 	if err != nil {
 		panic(err)
 	}
-	return model.Recording{CollectionID: cid, Key: hash, Route: "/v1/responses", Request: req, MatchingInput: input, UpstreamIdentity: "test", Streaming: true}
+	return model.Recording{CollectionID: cid, Key: hash, Route: "/v1/responses", Request: req, MatchingInput: input, Streaming: true}
 }
 func messagesRecording(cid int64, key string) model.Recording {
 	req := []byte(fmt.Sprintf(`{"model":"m","messages":[{"role":"user","content":%q}],"stream":true}`, key))
-	hash, input, err := matching.Key("/v1/messages", "test", req, nil)
+	hash, input, err := matching.Key("/v1/messages", req, nil)
 	if err != nil {
 		panic(err)
 	}
-	return model.Recording{CollectionID: cid, Key: hash, Route: "/v1/messages", Request: req, MatchingInput: input, UpstreamIdentity: "test", Streaming: true}
+	return model.Recording{CollectionID: cid, Key: hash, Route: "/v1/messages", Request: req, MatchingInput: input, Streaming: true}
 }
 func testRevision(body, source string) model.Revision {
 	return model.Revision{Status: 200, Headers: map[string]string{"Content-Type": "text/event-stream"}, Events: []model.Event{

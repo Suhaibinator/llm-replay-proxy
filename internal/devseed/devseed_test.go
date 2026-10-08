@@ -34,7 +34,7 @@ func TestSeedProducesValidVariedTraffic(t *testing.T) {
 	if settings.ActiveCollectionID != res.Collection.ID {
 		t.Fatal("collection not activated")
 	}
-	in, err := db.Insights(ctx, res.Collection.ID, now.AddDate(0, 0, -30), now, "")
+	in, err := db.Insights(ctx, res.Collection.ID, now.AddDate(0, 0, -30), now, store.InsightFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,13 +127,13 @@ func BenchmarkInsights10k(b *testing.B) {
 		b.Fatal(err)
 	}
 	started := time.Now()
-	if _, err = db.Insights(ctx, res.Collection.ID, now.AddDate(0, 0, -30), now.Add(time.Minute), ""); err != nil {
+	if _, err = db.Insights(ctx, res.Collection.ID, now.AddDate(0, 0, -30), now.Add(time.Minute), store.InsightFilter{}); err != nil {
 		b.Fatal(err)
 	}
 	b.Logf("%d rows; first call (computes summaries) %v", res.History, time.Since(started))
 	b.Run("insights", func(b *testing.B) {
 		for b.Loop() {
-			if _, err := db.Insights(ctx, res.Collection.ID, now.AddDate(0, 0, -30), now.Add(time.Minute), ""); err != nil {
+			if _, err := db.Insights(ctx, res.Collection.ID, now.AddDate(0, 0, -30), now.Add(time.Minute), store.InsightFilter{}); err != nil {
 				b.Fatal(err)
 			}
 		}

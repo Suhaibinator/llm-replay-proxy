@@ -24,6 +24,7 @@ import {
   outcomeCounts,
   outcomeTone,
   rowModel,
+  rowProvider,
   shortRoute,
   timingScale,
   TRAFFIC_ROWS,
@@ -50,6 +51,7 @@ export function TrafficView(props: ViewProps) {
     ...emptyTrafficFilter,
     outcomes: linkedOutcomes(link.outcome),
     model: link.model ?? "",
+    provider: link.provider ?? "",
     thread: link.thread ?? "",
   }));
   // A new link (e.g. from Overview) replaces the linked filters.
@@ -58,9 +60,10 @@ export function TrafficView(props: ViewProps) {
       ...f,
       outcomes: linkedOutcomes(link.outcome),
       model: link.model ?? "",
+      provider: link.provider ?? "",
       thread: link.thread ?? "",
     }));
-  }, [link.outcome, link.model, link.thread]);
+  }, [link.outcome, link.model, link.provider, link.thread]);
   const patch = (p: Partial<TrafficFilter>) =>
     setFilter((f) => ({ ...f, ...p }));
 
@@ -92,12 +95,19 @@ export function TrafficView(props: ViewProps) {
   const visible = useMemo(() => filterTraffic(shown, filter), [shown, filter]);
   const counts = useMemo(() => outcomeCounts(shown, filter), [shown, filter]);
   const models = useMemo(() => facet(shown, rowModel), [shown]);
+  const providers = useMemo(() => facet(shown, rowProvider), [shown]);
   const routes = useMemo(() => facet(shown, (h) => h.route), [shown]);
   const sources = useMemo(() => facet(shown, (h) => h.source), [shown]);
   const scale = useMemo(() => timingScale(visible), [visible]);
   const filtered =
     filter.outcomes.length > 0 ||
-    !!(filter.model || filter.route || filter.source || filter.thread) ||
+    !!(
+      filter.model ||
+      filter.provider ||
+      filter.route ||
+      filter.source ||
+      filter.thread
+    ) ||
     !!filter.query.trim();
 
   const onOpen = useCallback(
@@ -211,6 +221,12 @@ export function TrafficView(props: ViewProps) {
             value={filter.model}
             options={models}
             onChange={(model) => patch({ model })}
+          />
+          <FacetSelect
+            label="Provider"
+            value={filter.provider}
+            options={providers}
+            onChange={(provider) => patch({ provider })}
           />
           <FacetSelect
             label="Route"

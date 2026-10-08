@@ -51,6 +51,7 @@ export function insightsURL(
   range: RangeId,
   model = "",
   now = new Date(),
+  provider = "",
 ) {
   const { from, to } = rangeWindow(range, now);
   const q = new URLSearchParams({
@@ -59,6 +60,7 @@ export function insightsURL(
     to: to.toISOString(),
   });
   if (model) q.set("model", model);
+  if (provider) q.set("provider", provider);
   return `/api/insights?${q}`;
 }
 
@@ -625,6 +627,24 @@ export function mergeModelOptions(
     if (!seen.has(name)) {
       seen.add(name);
       out.push(name);
+    }
+  }
+  if (active && !seen.has(active)) out.push(active);
+  return out;
+}
+
+/** Provider names seen so far, busiest first; same merge as mergeModelOptions. */
+export function mergeProviderOptions(
+  known: string[],
+  providers: Insights["providers"],
+  active = "",
+) {
+  const out = [...known];
+  const seen = new Set(out);
+  for (const p of [...providers].sort((a, b) => b.requests - a.requests)) {
+    if (!seen.has(p.provider)) {
+      seen.add(p.provider);
+      out.push(p.provider);
     }
   }
   if (active && !seen.has(active)) out.push(active);

@@ -15,6 +15,7 @@ import {
   insightsURL,
   isRange,
   mergeModelOptions,
+  mergeProviderOptions,
   RANGES,
   type RangeId,
 } from "@/lib/insights";
@@ -70,13 +71,19 @@ export function OverviewView(props: ViewProps) {
   } = props;
   const [range, setRangeState] = useState<RangeId>("7d");
   const [model, setModel] = useState(filter.model ?? "");
+  const [provider, setProvider] = useState(filter.provider ?? "");
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [known, setKnown] = useState<{ collection: number; models: string[] }>({
+  const [known, setKnown] = useState<{
+    collection: number;
+    models: string[];
+    providers: string[];
+  }>({
     collection: 0,
     models: [],
+    providers: [],
   });
   const [ready, setReady] = useState(false);
 
@@ -87,6 +94,7 @@ export function OverviewView(props: ViewProps) {
     setReady(true);
   }, []);
   useEffect(() => setModel(filter.model ?? ""), [filter.model]);
+  useEffect(() => setProvider(filter.provider ?? ""), [filter.provider]);
 
   const setRange = (r: RangeId) => {
     setRangeState(r);
@@ -95,15 +103,18 @@ export function OverviewView(props: ViewProps) {
     } catch {}
   };
 
-  const key = `${collectionId}|${range}|${model}`;
+  const key = `${collectionId}|${range}|${model}|${provider}`;
   useEffect(() => {
     if (!collectionId || !ready) return;
     const controller = new AbortController();
     let live = true;
     setLoading(true);
-    api<Insights>(insightsURL(collectionId, range, model), {
-      signal: controller.signal,
-    })
+    api<Insights>(
+      insightsURL(collectionId, range, model, undefined, provider),
+      {
+        signal: controller.signal,
+      },
+    )
       .then((data) => {
         if (!live) return;
         setLoaded({ key, data });
@@ -113,6 +124,10 @@ export function OverviewView(props: ViewProps) {
           models: mergeModelOptions(
             k.collection === collectionId ? k.models : [],
             data.models,
+          ),
+          providers: mergeProviderOptions(
+            k.collection === collectionId ? k.providers : [],
+            data.providers,
           ),
         }));
       })
@@ -125,7 +140,7 @@ export function OverviewView(props: ViewProps) {
       live = false;
       controller.abort();
     };
-    // `key` covers collection, range and model; refreshKey and retry refetch in place.
+    // `key` covers collection, range, model and provider; refreshKey and retry refetch in place.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, refreshKey, retry, ready]);
 
@@ -149,11 +164,24 @@ export function OverviewView(props: ViewProps) {
       ),
     [known, collectionId, model],
   );
+  const providerOptions = useMemo(
+    () =>
+      mergeProviderOptions(
+        known.collection === collectionId ? known.providers : [],
+        [],
+        provider,
+      ),
+    [known, collectionId, provider],
+  );
   const rangeInfo = RANGES.find((r) => r.id === range)!;
   const collection = collections.find((c) => c.id === collectionId);
   const toggleModel = (m: string) => setModel((cur) => (cur === m ? "" : m));
   const openTraffic = (m = model) =>
-    navigate(m ? { view: "traffic", model: m } : { view: "traffic" });
+    navigate({
+      view: "traffic",
+      ...(m && { model: m }),
+      ...(provider && { provider }),
+    });
 
   const filters = (
     <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
@@ -209,6 +237,42 @@ export function OverviewView(props: ViewProps) {
             ))}
           </SelectContent>
         </Select>
+        {providerOptions.length > 0 && (
+          <Select
+            value={provider || ALL}
+            onValueChange={(v) => setProvider(v === ALL ? "" : v)}
+          >
+            <SelectTrigger
+              aria-label="Provider filter"
+              className="w-auto min-w-36 max-w-[14rem] bg-card"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL}>All providers</SelectItem>
+              {providerOptions.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {p}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {provider && (
+          <span className="inline-flex h-9 max-w-full items-center gap-1 rounded-lg border bg-secondary pl-3 pr-1 text-xs text-secondary-foreground">
+            <span className="truncate">
+              Provider: <span className="font-semibold">{provider}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setProvider("")}
+              aria-label="Clear provider filter"
+              className="inline-flex size-7 items-center justify-center rounded-md outline-none hover:bg-background/70 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X className="size-3.5" />
+            </button>
+          </span>
+        )}
         {model && (
           <span className="inline-flex h-9 max-w-full items-center gap-1 rounded-lg border bg-secondary pl-3 pr-1 text-xs text-secondary-foreground">
             <span className="truncate">

@@ -125,9 +125,9 @@ func TestServerRequiresTokensAndNeverForwardsThem(t *testing.T) {
 	upstream := httptest.NewServer(spy)
 	defer upstream.Close()
 	dir := t.TempDir()
-	cfg := config.Config{Listen: "127.0.0.1:0", Database: filepath.Join(dir, "replay.sqlite"), Upstreams: map[string]config.Upstream{
+	cfg := config.Config{Listen: "127.0.0.1:0", Database: filepath.Join(dir, "replay.sqlite"), DefaultProvider: "fixture", Providers: map[string]config.Provider{"fixture": {Upstreams: map[string]config.Upstream{
 		"/v1/chat/completions": {URL: upstream.URL + "/v1/chat/completions", APIKey: "upstream-secret"},
-	}}
+	}}}}
 	db, err := store.Open(cfg.Database)
 	if err != nil {
 		t.Fatal(err)

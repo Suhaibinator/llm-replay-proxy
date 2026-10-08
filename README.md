@@ -12,6 +12,7 @@ make build
 cp config.example.json config.local.json
 export OPENAI_API_KEY='your-key'      # upstream provider keys, used only by the proxy
 export ANTHROPIC_API_KEY='your-key'
+export OPENROUTER_API_KEY='your-key'
 ./bin/replay-proxy -config config.local.json
 ```
 
@@ -21,7 +22,7 @@ Every `/v1/*` and `/api/*` request needs an access token (see [Authentication](#
 ./bin/replay-proxy token issue -config config.local.json
 ```
 
-Fresh databases start in **Replay** mode and a `Default` collection. Configure the fixed upstream URL for each protocol you use; keep the same URLs and non-secret settings for offline replay. Credentials are optional for replay. `-listen` and `-db` override configuration. `REPLAY_LISTEN`, `REPLAY_DATABASE`, and `REPLAY_{CHAT,RESPONSES,ANTHROPIC}_{URL,API_KEY}` environment overrides are also supported.
+Fresh databases start in **Replay** mode and a `Default` collection. Configure one or more named [providers](#choosing-a-provider). Credentials, and providers themselves, are optional for replay. `-listen` and `-db` override configuration. `REPLAY_LISTEN`, `REPLAY_DATABASE`, and `REPLAY_DEFAULT_PROVIDER` environment overrides are also supported.
 
 Optional [KMS integration](docs/kms.md) loads startup configuration and upstream secrets through the existing KMS Go SDK, with TLS/mTLS and version pins. Start with `config.kms.example.json`. Local files and environment variables work without KMS.
 
@@ -33,7 +34,35 @@ The server exposes:
 | Responses | `/v1/responses` |
 | Anthropic Messages | `/v1/messages` |
 
-Upstream URLs are complete endpoints, not base URLs. Caller credentials are not forwarded. Configure credentials through environment variables or a private local JSON file. `api_key_env` names an environment variable; `api_key` supports a literal local-file secret. No credentials are written into recordings or exports. Requests and model outputs themselves may contain sensitive application data.
+Upstream URLs are complete endpoints, not base URLs. Caller credentials and headers are not forwarded. Configure credentials through environment variables or a private local JSON file. `api_key_env` names an environment variable; `api_key` supports a literal local-file secret. No credentials are written into recordings or exports. Requests and model outputs themselves may contain sensitive application data.
+
+## Choosing a provider
+
+A provider is a named set of upstreams, one per inference route it serves. Each upstream has its own URL, credential (`api_key_env`, `api_key`, or a [KMS](docs/kms.md) `api_key_secret`) and fixed non-secret headers. `default_provider` names the one used when a request does not choose:
+
+```json
+{
+  "default_provider": "direct",
+  "providers": {
+    "direct": {"upstreams": {"/v1/chat/completions": {"url": "https://api.openai.com/v1/chat/completions", "api_key_env": "OPENAI_API_KEY"}}},
+    "openrouter": {"upstreams": {"/v1/chat/completions": {"url": "https://openrouter.ai/api/v1/chat/completions", "api_key_env": "OPENROUTER_API_KEY"}}}
+  }
+}
+```
+
+A caller selects a provider per request with the `X-Replay-Provider` header (case-insensitive):
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions -H "Authorization: Bearer $TOKEN" \
+  -H 'X-Replay-Provider: openrouter' -d '{"model":"openai/gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+With the OpenAI SDKs, pass it as a default header (`default_headers` in Python, `defaultHeaders` in Node). Callers can only pick configured providers; they never supply a URL or key. Provider names are 1–64 lowercase letters, digits, `-` or `_`.
+
+- No header (or an empty one): the default provider serves the request. If it does not configure the route, replay still works and forwarding returns 503 `upstream_not_configured`.
+- An unknown name returns 400 `unknown_provider`; a provider without the requested route returns 400 `provider_route_not_configured`. Both apply in every mode, so a typo never silently replays or goes elsewhere.
+- The provider is **not** part of matching: a recording made through one provider replays for requests that select another. In Record or Auto mode, forwarding through a different provider publishes a new revision of the same recording.
+- History records which provider each request selected. The dashboard and traffic views filter by provider, and `/api/history` and `/api/insights` accept `provider=`.
 
 ## Authentication
 
@@ -98,7 +127,7 @@ rate, completion errors, and separate upstream/replay duration and first-SSE-
 event percentiles. Record-mode requests are cache bypasses. Existing history
 from an older database remains untimed rather than being treated as zero.
 
-Matching uses a versioned SHA-256 input containing the API route, fixed non-secret upstream configuration, and canonical JSON request. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
+Matching uses a versioned SHA-256 input containing the API type (Chat Completions, Responses, or Messages) and the canonical JSON request: model, messages, temperature, tools, and every other field. The upstream provider, its URL, and its headers are not part of it. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
 
 Collection-specific JSON Pointer exclusions remove fields only from matching, never from the forwarded request. For example, `/metadata/run_id` ignores a volatile run identifier. Matching rules are immutable: create a new collection to change exclusions. Use the request comparison panel to inspect changing fields before adding exclusions.
 
@@ -112,7 +141,7 @@ The control panel provides collection management, request history and hit/miss o
 
 Edits are validated before becoming new revisions. Stream structure, completion, and text/final-output agreement are checked. Restoring activates a saved immutable revision without deleting history. Usage remains historical metadata from the original provider response; editing never estimates token counts.
 
-Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions; request history is not included. Import adds collections to the current database. Upstream credentials and runtime configuration are separate. Keep the same non-secret upstream settings when moving recordings between installations.
+Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions; request history is not included. Import adds collections to the current database. Upstream credentials and runtime configuration are separate; recordings replay regardless of the providers configured where they are imported.
 
 ## Recording a demo
 

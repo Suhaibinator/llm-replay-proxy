@@ -271,7 +271,6 @@ function fixture(route, streaming) {
       key: "viewer-key",
       route,
       streaming,
-      upstream_identity: "fixture",
       active_revision_id: 1,
       created_at: "2026-09-17T12:00:00Z",
     },

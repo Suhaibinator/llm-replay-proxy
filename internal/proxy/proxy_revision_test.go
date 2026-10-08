@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/local/llm-replay-proxy/internal/store"
 )
 
 func TestHistoryLinksTheServedRevision(t *testing.T) {
@@ -13,7 +15,7 @@ func TestHistoryLinksTheServedRevision(t *testing.T) {
 		return response(`{"id":"c1","model":"demo-1","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`, "application/json"), nil
 	})}
 	db := openTestStore(t, "auto")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/chat/completions": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/chat/completions": {URL: "https://upstream.invalid"}}}})
 	body := `{"model":"demo","messages":[{"role":"user","content":"hi"}]}`
 	for range 3 {
 		if w := perform(h, "/v1/chat/completions", body); w.Code != 200 {
@@ -22,7 +24,7 @@ func TestHistoryLinksTheServedRevision(t *testing.T) {
 	}
 	s, _ := db.Settings(ctx)
 	now := time.Now()
-	in, err := db.Insights(ctx, s.ActiveCollectionID, now.Add(-time.Hour), now.Add(time.Hour), "")
+	in, err := db.Insights(ctx, s.ActiveCollectionID, now.Add(-time.Hour), now.Add(time.Hour), store.InsightFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

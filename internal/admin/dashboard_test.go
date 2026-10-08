@@ -54,7 +54,7 @@ func TestDashboardEndpoints(t *testing.T) {
 		t.Fatalf("insights: %d %s", w.Code, w.Body.String())
 	}
 	raw := decodeAs[map[string]any](t, w.Body.Bytes())
-	if got := keys(raw); got != "bucket,from,latency,models,routes,series,to,top_recordings,top_threads,totals" {
+	if got := keys(raw); got != "bucket,from,latency,models,providers,routes,series,to,top_recordings,top_threads,totals" {
 		t.Fatalf("insights keys %s", got)
 	}
 	totals := raw["totals"].(map[string]any)

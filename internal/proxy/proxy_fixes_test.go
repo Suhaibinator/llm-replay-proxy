@@ -31,7 +31,7 @@ func TestClientCancelBeforeUpstreamHeadersIsInterrupted(t *testing.T) {
 		return nil, r.Context().Err()
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	w := performWithContext(h, ctx, "/v1/responses", `{"input":"x"}`)
 	if w.Body.Len() != 0 {
 		t.Fatalf("wrote %d %q to a departed client", w.Code, w.Body.String())
@@ -58,7 +58,7 @@ func TestReplayWriteFailureIsInterrupted(t *testing.T) {
 		}
 		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return response(upstreamBody, contentType), nil })}
 		db := openTestStore(t, "record")
-		h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+		h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 		if got := perform(h, "/v1/responses", body); got.Code != 200 {
 			t.Fatalf("record = %d %s", got.Code, got.Body.String())
 		}
@@ -75,7 +75,7 @@ func TestLiveWriteFailureIsInterrupted(t *testing.T) {
 		return response(matrixResponsesBody("r1", "hi"), "application/json"), nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	h.ServeHTTP(&brokenPipeWriter{header: http.Header{}}, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m"}`)))
 	if got := latestHistory(t, db); got.Outcome != "interrupted" {
 		t.Fatalf("history = %+v", got)
@@ -88,7 +88,7 @@ func TestStreamingUpstreamErrorStatusLeadsHistoryDetail(t *testing.T) {
 		return matrixResponse(http.StatusTooManyRequests, errorBody, "application/json"), nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/chat/completions": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/chat/completions": {URL: "https://upstream.invalid"}}}})
 	live := perform(h, "/v1/chat/completions", `{"stream":true}`)
 	if live.Code != http.StatusTooManyRequests || live.Body.String() != errorBody {
 		t.Fatalf("live = %d %q", live.Code, live.Body.String())
@@ -105,7 +105,7 @@ func TestNullStreamIsNonStreaming(t *testing.T) {
 		return response(matrixResponsesBody("r1", "hi"), "application/json"), nil
 	})}
 	db := openTestStore(t, "record")
-	h := New(db, Config{Client: client, Upstreams: map[string]Upstream{"/v1/responses": {URL: "https://upstream.invalid"}}})
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
 	if got := perform(h, "/v1/responses", `{"model":"m","stream":null}`); got.Code != 200 {
 		t.Fatalf("record = %d %s", got.Code, got.Body.String())
 	}
@@ -135,7 +135,7 @@ func TestCompressedUpstreamIsDecoded(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			db := openTestStore(t, "record")
-			h := New(db, Config{Client: tc.client, Upstreams: map[string]Upstream{"/v1/responses": {URL: server.URL, Headers: tc.headers}}})
+			h := New(db, Config{Client: tc.client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: server.URL, Headers: tc.headers}}}})
 			live := perform(h, "/v1/responses", `{"model":"m"}`)
 			if live.Code != 200 || live.Body.String() != payload {
 				t.Fatalf("live = %d %q", live.Code, live.Body.String())
