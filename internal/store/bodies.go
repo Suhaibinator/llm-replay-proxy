@@ -11,7 +11,6 @@ import (
 	"fmt"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/local/llm-replay-proxy/internal/model"
 )
 
 // Request bodies are content-addressed. Each distinct body is stored once, as
@@ -76,10 +75,8 @@ func nextChunk(b []byte) int {
 var (
 	// A chunk's window never needs to exceed the chunk, which lets its decoder
 	// refuse anything that would expand past chunkMax.
-	chunkEncoder  = mustEncoder(zstd.WithWindowSize(chunkMax))
-	chunkDecoder  = mustDecoder(chunkMax)
-	eventsEncoder = mustEncoder()
-	eventsDecoder = mustDecoder(maxEventsBytes)
+	chunkEncoder = mustEncoder(zstd.WithWindowSize(chunkMax))
+	chunkDecoder = mustDecoder(chunkMax)
 )
 
 func mustEncoder(opts ...zstd.EOption) *zstd.Encoder {
@@ -284,27 +281,4 @@ AND id NOT IN (SELECT request_body FROM history WHERE request_body IS NOT NULL)`
 	}
 	_, err = tx.ExecContext(ctx, "DELETE FROM chunks WHERE id NOT IN (SELECT id FROM temp.live_chunks)")
 	return err
-}
-
-// Events are kept frame for frame (replay timing, validation, text edits and
-// provider-state lookups all work per frame) and stored as one zstd blob per
-// revision: SSE JSON repeats itself heavily and compresses well.
-func encodeEvents(events []model.Event) ([]byte, error) {
-	j, err := json.Marshal(events)
-	if err != nil {
-		return nil, err
-	}
-	return eventsEncoder.EncodeAll(j, nil), nil
-}
-
-func decodeEvents(packed []byte) ([]model.Event, error) {
-	j, err := eventsDecoder.DecodeAll(packed, nil)
-	if err != nil {
-		return nil, fmt.Errorf("decode events: %w", err)
-	}
-	var events []model.Event
-	if err = json.Unmarshal(j, &events); err != nil {
-		return nil, fmt.Errorf("decode events: %w", err)
-	}
-	return events, nil
 }

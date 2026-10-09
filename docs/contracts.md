@@ -31,6 +31,8 @@ issues, refreshes, lists, or revokes tokens.
 | `/api/collections/N` | DELETE | 204; deletes the collection, its recordings and its history. 409 `collection_active` for the active collection |
 | `/api/recordings?collection_id=N` | GET | Recordings, newest first, each with a request summary (`request`), the active revision's response summary (`response`), `updated_at`, active revision `source`, `revisions`, `hits` and `last_hit_at` |
 | `/api/recordings/N` | GET, DELETE | GET: active recording/revision, all revisions, editable text and unavailability reason, exact `request_text` and `matching_input_text`. DELETE: 204; removes the recording and its revisions |
+| `/api/recordings/N?revision_details=lazy` | GET | Same active content and request text, with `revision_summaries` instead of full historical `revisions`; each summary has `id`, `recording_id`, `status`, `source`, and `created_at`, newest first, without truncation |
+| `/api/recordings/N/revisions/V` | GET | Complete immutable revision V belonging to recording N; 404 if either is missing or V belongs to a different recording. Original request provenance remains stored and is not included in revision JSON |
 | `/api/recordings/N/edit` | POST | `{text, base_revision_id}` or `{revision, base_revision_id}` |
 | `/api/recordings/N/restore` | POST | `{revision_id, base_revision_id}` |
 | `/api/history?collection_id=N` | GET, DELETE | GET: newest calls with a request summary (`request`, null without a body); optional `limit` up to 1000 and `after_id` for rows newer than an id. DELETE: 204; clears the collection's history |
@@ -59,6 +61,12 @@ reassemble to its recorded hash, blank (after trimming) collection names and `cr
 are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions or
 revision headers are stored as empty values. Request history in a
 snapshot is ignored.
+
+The current SQLite storage format is 6 and is intended for fresh deployments.
+Earlier databases and snapshots are rejected; no migration is provided.
+Non-streaming bodies and binary SSE frames retain their exact stored bytes.
+JSON API strings represent Unicode text; malformed UTF-8 bytes retained by the
+storage and replay paths are not faithfully representable in those strings.
 
 Request bytes appear only as exact text in `request_text` (recording detail and
 history item); lists and revisions never carry them, and an edit that supplies
