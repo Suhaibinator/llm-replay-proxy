@@ -15,6 +15,7 @@ import {
   type Diff,
   type Entry,
   type History,
+  type Revision,
   api,
   date,
   editableRevision,
@@ -91,7 +92,7 @@ export function Inspector({
       setMisses([]);
     }
     try {
-      const e = await api<Entry>(`/api/recordings/${id}`);
+      const e = await api<Entry>(`/api/recordings/${id}?revision_details=lazy`);
       if (v !== version.current) return;
       setEntry(e);
       setEditText(e.text || "");
@@ -256,6 +257,7 @@ export function Inspector({
           )
         ) : (
           <InspectorBody
+            key={entry.recording.id}
             entry={entry}
             error={error}
             clearError={() => setError("")}
@@ -330,7 +332,8 @@ function InspectorBody({
       clearCompare();
     }
   }, [chosenHistoryId, historyId, misses.length, clearCompare]);
-  const revisions = entry.revisions || [entry.revision];
+  const revisions = entry.revision_summaries ||
+    entry.revisions || [entry.revision];
   return (
     <>
       <DialogHeader>
@@ -494,12 +497,15 @@ function InspectorBody({
                       </Button>
                     )}
                   </div>
-                  <details className="mt-2 border-t pt-2 text-xs">
-                    <summary className="cursor-pointer rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
-                      Inspect revision data
-                    </summary>
-                    <CodeBlock className="mt-2 max-h-64">{pretty(r)}</CodeBlock>
-                  </details>
+                  <RevisionDetails
+                    recordingId={recordingId}
+                    revisionId={r.id}
+                    initial={
+                      active
+                        ? entry.revision
+                        : entry.revisions?.find((v) => v.id === r.id)
+                    }
+                  />
                 </li>
               );
             })}
@@ -614,6 +620,77 @@ function InspectorBody({
         </TabsContent>
       </Tabs>
     </>
+  );
+}
+
+// Keep historical payloads out of the initial inspector request and render.
+// A keyed parent unmounts these readers on recording changes; late requests
+// are ignored after unmount. Immutable details may be reused after collapse.
+function RevisionDetails({
+  recordingId,
+  revisionId,
+  initial,
+}: {
+  recordingId: number;
+  revisionId: number;
+  initial?: Revision;
+}) {
+  const [open, setOpen] = useState(false);
+  const [revision, setRevision] = useState<Revision | undefined>(initial);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const detail = initial || revision;
+  const live = useRef(true);
+  const pending = useRef(false);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  async function load() {
+    if (detail || pending.current) return;
+    pending.current = true;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api<Revision>(
+        `/api/recordings/${recordingId}/revisions/${revisionId}`,
+      );
+      if (live.current) setRevision(result);
+    } catch (e) {
+      if (live.current) setError(message(e));
+    } finally {
+      pending.current = false;
+      if (live.current) setLoading(false);
+    }
+  }
+  return (
+    <details
+      className="mt-2 border-t pt-2 text-xs"
+      onToggle={(event) => {
+        const expanded = event.currentTarget.open;
+        setOpen(expanded);
+        if (expanded) void load();
+      }}
+    >
+      <summary className="cursor-pointer rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+        Inspect revision data
+      </summary>
+      {open &&
+        (detail ? (
+          <CodeBlock className="mt-2 max-h-64">{pretty(detail)}</CodeBlock>
+        ) : error ? (
+          <div role="alert" className="mt-2">
+            <p>{error}</p>
+            <Button variant="outline" size="sm" onClick={() => void load()}>
+              Retry
+            </Button>
+          </div>
+        ) : loading ? (
+          <Spinner label="Loading revision" className="mt-2" />
+        ) : null)}
+    </details>
   );
 }
 

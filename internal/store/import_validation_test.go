@@ -13,6 +13,7 @@ func TestImportRejectsCorruptionWithoutPartialCollections(t *testing.T) {
 		{"matching rules", `UPDATE collections SET exclusions='["/stream"]'`},
 		{"incomplete stream", `UPDATE revisions SET events=X'28b52ffd04581100005b5d561f7f61'`},
 		{"unreadable events", `UPDATE revisions SET events='[]'`},
+		{"unreadable response body", `UPDATE revisions SET body=X'ff'`},
 		{"response headers", `UPDATE revisions SET headers='{"Set-Cookie":"session=forged"}'`},
 		{"provenance", `UPDATE revisions SET request_body=(SELECT max(request_body) FROM revisions)`},
 		{"chunk bytes", `UPDATE chunks SET data=zeroblob(length(data))`},
@@ -20,6 +21,7 @@ func TestImportRejectsCorruptionWithoutPartialCollections(t *testing.T) {
 		{"chunk list", `UPDATE bodies SET chunks=X'ff'`},
 		{"chunk size", `UPDATE chunks SET size=size+1`},
 		{"storage format", `PRAGMA user_version=1`},
+		{"previous storage format", `PRAGMA user_version=5`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

@@ -42,7 +42,7 @@ func sqliteFileURL(path string) string { return (&url.URL{Scheme: "file", Path: 
 
 // schemaVersion is stored in PRAGMA user_version. A database or snapshot in
 // any other format is refused rather than migrated.
-const schemaVersion = 5
+const schemaVersion = 6
 
 const schema = `
 PRAGMA foreign_keys=ON;
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS recordings (
 );
 CREATE TABLE IF NOT EXISTS revisions (
  id INTEGER PRIMARY KEY, recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
- status INTEGER NOT NULL, headers TEXT NOT NULL, body TEXT NOT NULL, events BLOB NOT NULL,
+ status INTEGER NOT NULL, headers TEXT NOT NULL, body BLOB NOT NULL, events BLOB NOT NULL,
  request_body INTEGER NOT NULL REFERENCES bodies(id), source TEXT NOT NULL, created_at TEXT NOT NULL,
  response_summary TEXT, response_summary_v INTEGER NOT NULL DEFAULT 0
 );
@@ -294,8 +294,8 @@ const revisionCols = "id,recording_id,status,headers,body,events,request_body,so
 // request for callers that need it.
 func scanRevision(row interface{ Scan(...any) error }) (r model.Revision, bodyID sql.NullInt64, err error) {
 	var h string
-	var e []byte
-	err = row.Scan(&r.ID, &r.RecordingID, &r.Status, &h, &r.Body, &e, &bodyID, &r.Source, &r.CreatedAt)
+	var b, e []byte
+	err = row.Scan(&r.ID, &r.RecordingID, &r.Status, &h, &b, &e, &bodyID, &r.Source, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, bodyID, ErrNotFound
 	}
@@ -303,6 +303,9 @@ func scanRevision(row interface{ Scan(...any) error }) (r model.Revision, bodyID
 		return r, bodyID, err
 	}
 	if err = json.Unmarshal([]byte(h), &r.Headers); err != nil {
+		return r, bodyID, err
+	}
+	if r.Body, err = decodeResponseBody(b); err != nil {
 		return r, bodyID, err
 	}
 	r.Events, err = decodeEvents(e)
@@ -401,6 +404,10 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if err != nil {
 		return model.Entry{}, err
 	}
+	bj, err := encodeResponseBody(rev.Body)
+	if err != nil {
+		return model.Entry{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.Entry{}, err
@@ -433,7 +440,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	}
 	rev.RecordingID = rec.ID
 	rev.CreatedAt = at
-	res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, rev.Body, ej, bodyID, rev.Source, rev.CreatedAt)
+	res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, bj, ej, bodyID, rev.Source, rev.CreatedAt)
 	if err != nil {
 		return model.Entry{}, err
 	}
@@ -503,6 +510,31 @@ func (s *Store) Get(ctx context.Context, id int64) (model.Entry, error) {
 	}
 	r.Request, r.MatchingInput = v.Request, v.MatchingInput
 	return model.Entry{Recording: r, Revision: v}, nil
+}
+
+// RevisionSummaries reads metadata only, including every historical revision.
+func (s *Store) RevisionSummaries(ctx context.Context, rid int64) ([]model.RevisionSummary, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id,recording_id,status,source,created_at FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.RevisionSummary{}
+	for rows.Next() {
+		var v model.RevisionSummary
+		if err = rows.Scan(&v.ID, &v.RecordingID, &v.Status, &v.Source, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// Revision scopes the detail lookup to its recording; request provenance stays
+// stored but is not needed by the revision JSON API.
+func (s *Store) Revision(ctx context.Context, rid, vid int64) (model.Revision, error) {
+	v, _, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
+	return v, err
 }
 
 func (s *Store) Revisions(ctx context.Context, rid int64) ([]model.Revision, error) {
@@ -831,19 +863,24 @@ func (s *Store) HasProviderState(ctx context.Context, cid int64, stateID string)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var body string
-		var events []byte
-		if err := rows.Scan(&body, &events); err != nil {
+		var packedBody, events []byte
+		if err := rows.Scan(&packedBody, &events); err != nil {
+			return false, err
+		}
+		body, err := decodeResponseBody(packedBody)
+		if err != nil {
 			return false, err
 		}
 		if rawContainsState(body, stateID) {
 			return true, nil
 		}
-		if es, err := decodeEvents(events); err == nil {
-			for _, e := range es {
-				if rawContainsState(eventJSON(e.Data), stateID) {
-					return true, nil
-				}
+		es, err := decodeEvents(events)
+		if err != nil {
+			return false, err
+		}
+		for _, e := range es {
+			if rawContainsState(eventJSON(e.Data), stateID) {
+				return true, nil
 			}
 		}
 	}
@@ -1033,11 +1070,15 @@ func (s *Store) Import(ctx context.Context, sourcePath string) ([]model.Collecti
 				if e != nil {
 					return nil, e
 				}
+				bj, e := encodeResponseBody(v.Body)
+				if e != nil {
+					return nil, e
+				}
 				bodyID, e := internBody(ctx, tx, v.Request)
 				if e != nil {
 					return nil, e
 				}
-				res, e = tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, newRID, v.Status, hj, v.Body, ej, bodyID, v.Source, v.CreatedAt)
+				res, e = tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, newRID, v.Status, hj, bj, ej, bodyID, v.Source, v.CreatedAt)
 				if e != nil {
 					return nil, e
 				}
