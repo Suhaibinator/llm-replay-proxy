@@ -27,6 +27,10 @@ export type Revision = {
   source: string;
   created_at: string;
 };
+export type RevisionSummary = Pick<
+  Revision,
+  "id" | "recording_id" | "status" | "source" | "created_at"
+>;
 export type RequestSummary = {
   model: string;
   items: number;
@@ -59,6 +63,7 @@ export type Entry = {
   recording: Recording;
   revision: Revision;
   revisions?: Revision[];
+  revision_summaries?: RevisionSummary[];
   text?: string;
   text_unavailable_reason?: string;
   request_text?: string;

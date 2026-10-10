@@ -19,10 +19,13 @@ Requests dominate storage: a Responses client with `store: false` re-sends the w
 
 - Writing a body seen before (every replay hit of a recorded request) is one hash and one indexed lookup. A new turn stores only the chunks around the appended items, so a conversation's storage grows with its length, not with the square of it.
 - Reads reassemble a body from its chunks and verify it against the stored size and hash. The replay lookup never reads the request at all.
-- Every SSE frame is kept, with its offset, because replay pacing, validation, text editing, and provider-state lookups work per frame. A revision's frames are stored as one zstd-compressed JSON array.
-- Writes keep no reference counts. Export, the only path that deletes rows a snapshot must not carry, sweeps unreferenced bodies and chunks before compacting the file.
+- Non-streaming responses are stored as exact bytes, zstd-compressed when that saves at least an eighth. Provider JSON is never parsed and reserialized for storage.
+- Every SSE frame is kept, with its offset, because replay pacing, validation, text editing, and provider-state lookups work per frame. Frames use a binary count followed by unsigned-varint offset deltas and byte lengths and the original frame bytes. The first delta retains the first offset; zero deltas retain equal timestamps. This also preserves bytes that JSON string encoding would replace, such as invalid UTF-8 in comments.
+- Response body and event blobs have a codec byte (0 = raw, 1 = zstd), an unsigned-varint decoded byte length, and the payload. Compression is used for payloads of at least 128 bytes only when it saves at least an eighth. Reads enforce decoded-size limits, frame lengths, timestamp bounds, and complete consumption of the payload.
+- Writes keep no reference counts. Deletion and history pruning sweep unreferenced request bodies and chunks; export also sweeps before compacting the snapshot file.
+- The console requests revision metadata initially and fetches a historical response only when its details are expanded. The active response is reused. Every revision remains stored and export/import still includes complete revision history.
 
-The format version is SQLite's `user_version`. A database or snapshot in another format is refused, not migrated.
+The format version is SQLite's `user_version`, currently 6. This format targets fresh deployments; a database or snapshot in another format is refused, not migrated.
 
 The replay clock is injectable. The first frame uses the configured first-event delay; subsequent frames use the difference between their captured offsets, multiplied by the configured factor. Zero delays produce immediate playback, with cancellation checked between events.
 

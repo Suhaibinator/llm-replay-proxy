@@ -38,6 +38,15 @@ type Revision struct {
 	CreatedAt     string            `json:"created_at"`
 }
 
+// RevisionSummary lists immutable revision metadata without loading payloads.
+type RevisionSummary struct {
+	ID          int64  `json:"id"`
+	RecordingID int64  `json:"recording_id"`
+	Status      int    `json:"status"`
+	Source      string `json:"source"`
+	CreatedAt   string `json:"created_at"`
+}
+
 // RequestSummary describes a request body for lists and search without
 // sending the body itself.
 type RequestSummary struct {

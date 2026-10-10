@@ -99,7 +99,7 @@ func TestValidTerminalFrameWithTransportReadErrorIsNotPublished(t *testing.T) {
 }
 
 func TestHTTPStreamFramesSplitAtEveryByteRecordExactly(t *testing.T) {
-	payload := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\r\n\r\ndata: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r\n\r\n"
+	payload := "\xef\xbb\xbf: keepalive " + string([]byte{0xff}) + "\r\n\r\n" + "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\r\n\r\ndata: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r\n\r\n"
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		resp := response("", "text/event-stream; charset=utf-8")
 		resp.Body = io.NopCloser(&byteReader{data: []byte(payload)})

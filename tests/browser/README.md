@@ -40,3 +40,12 @@ database (see docs/dashboard-api.md) and serve it with a loopback config that
 sets `"auth": {"disabled": true}`.
 
 Build `web/out` before starting the proxy. Test screenshots and traces are written below `tests/browser/test-results/`.
+
+The mocked lazy-revision suite verifies on-demand loading, retry, active-response
+reuse, and isolation from delayed requests after switching recordings:
+
+```sh
+REPLAY_BROWSER_BASE_URL=http://127.0.0.1:18080 \
+  npx --prefix tests/browser playwright test \
+  --config=tests/browser/lazy-revisions.config.js
+```

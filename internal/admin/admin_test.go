@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -164,6 +165,108 @@ func TestInspectEditRestoreCompareAndHistory(t *testing.T) {
 	w = request(t, h, http.MethodPost, "/api/compare", map[string]any{"recording_id": e.Recording.ID, "history_id": history[0].ID})
 	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`9007199254740993`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"request_exists":true`)) {
 		t.Fatalf("history compare: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestLazyRevisionInspectionPreservesDetailsAndScope(t *testing.T) {
+	db, h := testAdmin(t)
+	first := publishFixture(t, db)
+	newRevision := first.Revision
+	newRevision.Body = strings.Replace(newRevision.Body, "hello", "updated", 1)
+	second, err := db.Publish(context.Background(), first.Recording, newRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordings := []model.Entry{second}
+	// Exercise stream details as well as non-streaming bodies.
+	rec := first.Recording
+	rec.Request = []byte(`{"model":"m","messages":[{"role":"user","content":"stream"}],"stream":true}`)
+	rec.Key, rec.MatchingInput, err = match.Key(rec.Route, rec.Request, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Streaming = true
+	stream, err := db.Publish(context.Background(), rec, model.Revision{Status: 200, Headers: map[string]string{"Content-Type": "text/event-stream"}, Source: "recorded", Events: []model.Event{
+		{Data: "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\r\n\r\n", OffsetMS: 17},
+		{Data: "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", OffsetMS: 17},
+		{Data: "data: [DONE]\n\n", OffsetMS: 99},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordings = append(recordings, stream)
+	for _, entry := range recordings {
+		base := "/api/recordings/" + itoa(entry.Recording.ID)
+		full := request(t, h, http.MethodGet, base, nil)
+		lazy := request(t, h, http.MethodGet, base+"?revision_details=lazy", nil)
+		var original struct {
+			Revision    model.Revision
+			Revisions   []model.Revision
+			RequestText string `json:"request_text"`
+		}
+		var light struct {
+			Revision    model.Revision
+			Summaries   []model.RevisionSummary `json:"revision_summaries"`
+			RequestText string                  `json:"request_text"`
+		}
+		if full.Code != 200 || lazy.Code != 200 {
+			t.Fatalf("inspect: %d %d", full.Code, lazy.Code)
+		}
+		if err = json.Unmarshal(full.Body.Bytes(), &original); err != nil {
+			t.Fatal(err)
+		}
+		if err = json.Unmarshal(lazy.Body.Bytes(), &light); err != nil {
+			t.Fatal(err)
+		}
+		var shape map[string]json.RawMessage
+		if err = json.Unmarshal(lazy.Body.Bytes(), &shape); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := shape["revisions"]; exists {
+			t.Fatal("lazy inspection returned full history")
+		}
+		if !reflect.DeepEqual(original.Revision, light.Revision) || original.RequestText != light.RequestText || len(original.Revisions) != len(light.Summaries) {
+			t.Fatal("lazy inspection lost active content or revisions")
+		}
+		for i, summary := range light.Summaries {
+			expected := original.Revisions[i]
+			if summary.ID != expected.ID || summary.RecordingID != expected.RecordingID || summary.Status != expected.Status || summary.Source != expected.Source || summary.CreatedAt != expected.CreatedAt {
+				t.Fatal("metadata changed")
+			}
+			detail := request(t, h, http.MethodGet, base+"/revisions/"+itoa(summary.ID), nil)
+			var got model.Revision
+			if detail.Code != 200 {
+				t.Fatalf("detail: %d %s", detail.Code, detail.Body.String())
+			}
+			if err = json.Unmarshal(detail.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, expected) {
+				t.Fatal("lazy detail differs from full API")
+			}
+			if head := request(t, h, http.MethodHead, base+"/revisions/"+itoa(summary.ID), nil); head.Code != 200 || head.Body.Len() != 0 {
+				t.Fatalf("HEAD: %d %s", head.Code, head.Body.String())
+			}
+		}
+	}
+	base := "/api/recordings/" + itoa(first.Recording.ID)
+	for _, path := range []string{base + "/revisions/" + itoa(stream.Revision.ID), base + "/revisions/999999", base + "/revisions/-1", base + "/revisions/1/extra"} {
+		if w := request(t, h, http.MethodGet, path, nil); w.Code != 404 {
+			t.Fatalf("unscoped/invalid detail %s: %d", path, w.Code)
+		}
+	}
+	detail := base + "/revisions/" + itoa(first.Revision.ID)
+	if w := request(t, h, http.MethodPost, detail, nil); w.Code != 405 {
+		t.Fatalf("POST detail: %d", w.Code)
+	}
+	if w := request(t, h, http.MethodPost, base+"/restore", map[string]any{"revision_id": first.Revision.ID, "base_revision_id": first.Revision.ID}); w.Code != 409 {
+		t.Fatalf("stale restore: %d", w.Code)
+	}
+	if err = db.DeleteRecording(context.Background(), first.Recording.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w := request(t, h, http.MethodGet, detail, nil); w.Code != 404 {
+		t.Fatalf("deleted detail: %d", w.Code)
 	}
 }
 

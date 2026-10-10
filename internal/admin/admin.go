@@ -421,6 +421,29 @@ func (h *handler) recordingAction(w http.ResponseWriter, r *http.Request, p stri
 	// The path is validated before the method: a path that cannot name a
 	// resource is 404 for every method, and only valid paths report 405.
 	id, ok := parseID(parts[0])
+	if ok && len(parts) == 3 && parts[1] == "revisions" {
+		vid, valid := parseID(parts[2])
+		if !valid {
+			writeError(w, 404, "not_found", "endpoint not found")
+			return
+		}
+		if !isRead(r) {
+			methodNotAllowed(w, "GET, HEAD")
+			return
+		}
+		v, err := h.db.Revision(r.Context(), id, vid)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		writeJSON(w, 200, v)
+		return
+	}
 	if !ok || len(parts) > 2 || (len(parts) == 2 && parts[1] != "edit" && parts[1] != "restore") {
 		writeError(w, 404, "not_found", "endpoint not found")
 		return
@@ -455,21 +478,28 @@ func (h *handler) inspect(w http.ResponseWriter, r *http.Request, id int64) {
 		writeStoreError(w, err)
 		return
 	}
-	revs, err := h.db.Revisions(r.Context(), id)
+	var revs []model.Revision
+	var summaries []model.RevisionSummary
+	if r.URL.Query().Get("revision_details") == "lazy" {
+		summaries, err = h.db.RevisionSummaries(r.Context(), id)
+	} else {
+		revs, err = h.db.Revisions(r.Context(), id)
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	text, reason := protocol.Text(e.Recording.Route, e.Recording.Streaming, e.Revision)
 	writeJSON(w, 200, struct {
-		Recording         model.Recording  `json:"recording"`
-		Revision          model.Revision   `json:"revision"`
-		Revisions         []model.Revision `json:"revisions"`
-		Text              string           `json:"text"`
-		Reason            string           `json:"text_unavailable_reason"`
-		RequestText       string           `json:"request_text"`
-		MatchingInputText string           `json:"matching_input_text"`
-	}{e.Recording, e.Revision, revs, text, reason, string(e.Recording.Request), string(e.Recording.MatchingInput)})
+		Recording         model.Recording         `json:"recording"`
+		Revision          model.Revision          `json:"revision"`
+		Revisions         []model.Revision        `json:"revisions,omitempty"`
+		RevisionSummaries []model.RevisionSummary `json:"revision_summaries,omitempty"`
+		Text              string                  `json:"text"`
+		Reason            string                  `json:"text_unavailable_reason"`
+		RequestText       string                  `json:"request_text"`
+		MatchingInputText string                  `json:"matching_input_text"`
+	}{e.Recording, e.Revision, revs, summaries, text, reason, string(e.Recording.Request), string(e.Recording.MatchingInput)})
 }
 
 func (h *handler) edit(w http.ResponseWriter, r *http.Request, id int64) {
