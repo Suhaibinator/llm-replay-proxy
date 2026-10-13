@@ -53,14 +53,14 @@ export function pushRoute(route: Route) {
   window.location.hash = next;
 }
 
-/** Rewrites the hash without a history entry (closing a dialog, for example). */
+/**
+ * Rewrites the hash without a history entry (closing a dialog, for example).
+ * location.replace rather than history.replaceState: Next patches the latter
+ * to schedule a router commit that rewrites the URL, and a commit landing after
+ * a later hash change would put the stale hash back.
+ */
 export function replaceRoute(route: Route) {
   const next = formatHash(route);
   if (window.location.hash === next) return;
-  window.history.replaceState(
-    null,
-    "",
-    `${window.location.pathname}${window.location.search}${next}`,
-  );
-  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  window.location.replace(next);
 }
