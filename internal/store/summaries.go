@@ -19,7 +19,7 @@ const (
 	// summaryVersion changes whenever protocol.SummarizeRequest does.
 	summaryVersion = 2
 	// responseSummaryVersion changes whenever protocol.SummarizeResponse does.
-	responseSummaryVersion = 1
+	responseSummaryVersion = 2
 )
 
 // idBatch bounds the ids bound into one IN (...) list.

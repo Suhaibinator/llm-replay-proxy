@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS collections (
 CREATE TABLE IF NOT EXISTS settings (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT NOT NULL,
  active_collection_id INTEGER NOT NULL REFERENCES collections(id),
- first_event_delay_ms INTEGER NOT NULL, delay_multiplier REAL NOT NULL, history_limit INTEGER NOT NULL
+ first_event_delay_ms INTEGER NOT NULL, pacing TEXT NOT NULL, delay_multiplier REAL NOT NULL,
+ target_tokens_per_second REAL NOT NULL, history_limit INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chunks (
  id INTEGER PRIMARY KEY, hash BLOB NOT NULL UNIQUE, codec INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL
@@ -167,7 +168,7 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO settings(singleton,mode,active_collection_id,first_event_delay_ms,delay_multiplier,history_limit) VALUES(1,'replay',?,0,1,?)`, id, DefaultHistoryLimit)
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO settings(singleton,mode,active_collection_id,first_event_delay_ms,pacing,delay_multiplier,target_tokens_per_second,history_limit) VALUES(1,'replay',?,0,?,1,?,?)`, id, model.PacingMultiplier, DefaultTargetTokensPerSecond, DefaultHistoryLimit)
 	if err != nil {
 		return err
 	}
@@ -243,12 +244,35 @@ func (s *Store) Collection(ctx context.Context, id int64) (model.Collection, err
 
 func (s *Store) Settings(ctx context.Context) (model.Settings, error) {
 	var v model.Settings
-	err := s.db.QueryRowContext(ctx, "SELECT mode,active_collection_id,first_event_delay_ms,delay_multiplier,history_limit FROM settings WHERE singleton=1").Scan(&v.Mode, &v.ActiveCollectionID, &v.FirstEventDelayMS, &v.DelayMultiplier, &v.HistoryLimit)
+	err := s.db.QueryRowContext(ctx, "SELECT mode,active_collection_id,first_event_delay_ms,pacing,delay_multiplier,target_tokens_per_second,history_limit FROM settings WHERE singleton=1").Scan(&v.Mode, &v.ActiveCollectionID, &v.FirstEventDelayMS, &v.Pacing, &v.DelayMultiplier, &v.TargetTokensPerSecond, &v.HistoryLimit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
 	return v, err
 }
+
+// DefaultTargetTokensPerSecond is a new database's target output speed, used
+// once pacing is switched to tokens per second.
+const DefaultTargetTokensPerSecond = 100
+
+// MaxPacingValue bounds the delay multiplier and the target tokens per second.
+const MaxPacingValue = 1_000_000
+
+// ValidatePacing checks the pacing mode and both of its values. Both values
+// are kept whichever mode is active, so switching back restores the other.
+func ValidatePacing(v model.Settings) error {
+	if v.Pacing != model.PacingMultiplier && v.Pacing != model.PacingTokensPerSecond {
+		return fmt.Errorf("pacing must be %s or %s", model.PacingMultiplier, model.PacingTokensPerSecond)
+	}
+	if math.IsNaN(v.DelayMultiplier) || math.IsInf(v.DelayMultiplier, 0) || v.DelayMultiplier < 0 || v.DelayMultiplier > MaxPacingValue {
+		return fmt.Errorf("delay_multiplier must be between 0 and %d", MaxPacingValue)
+	}
+	if math.IsNaN(v.TargetTokensPerSecond) || math.IsInf(v.TargetTokensPerSecond, 0) || v.TargetTokensPerSecond <= 0 || v.TargetTokensPerSecond > MaxPacingValue {
+		return fmt.Errorf("target_tokens_per_second must be greater than 0 and at most %d", MaxPacingValue)
+	}
+	return nil
+}
+
 func (s *Store) SetSettings(ctx context.Context, v model.Settings) error {
 	if v.Mode != "record" && v.Mode != "replay" && v.Mode != "auto" {
 		return errors.New("mode must be record, replay, or auto")
@@ -256,13 +280,13 @@ func (s *Store) SetSettings(ctx context.Context, v model.Settings) error {
 	if v.FirstEventDelayMS < 0 || v.FirstEventDelayMS > int64((24*time.Hour)/time.Millisecond) {
 		return errors.New("first event delay must be between 0 and 24 hours")
 	}
-	if math.IsNaN(v.DelayMultiplier) || math.IsInf(v.DelayMultiplier, 0) || v.DelayMultiplier < 0 || v.DelayMultiplier > 1_000_000 {
-		return errors.New("delay multiplier must be finite and between 0 and 1000000")
+	if err := ValidatePacing(v); err != nil {
+		return err
 	}
 	if v.HistoryLimit < 0 || v.HistoryLimit > MaxHistoryLimit {
 		return fmt.Errorf("history limit must be between 0 and %d", MaxHistoryLimit)
 	}
-	r, err := s.db.ExecContext(ctx, "UPDATE settings SET mode=?,active_collection_id=?,first_event_delay_ms=?,delay_multiplier=?,history_limit=? WHERE singleton=1", v.Mode, v.ActiveCollectionID, v.FirstEventDelayMS, v.DelayMultiplier, v.HistoryLimit)
+	r, err := s.db.ExecContext(ctx, "UPDATE settings SET mode=?,active_collection_id=?,first_event_delay_ms=?,pacing=?,delay_multiplier=?,target_tokens_per_second=?,history_limit=? WHERE singleton=1", v.Mode, v.ActiveCollectionID, v.FirstEventDelayMS, v.Pacing, v.DelayMultiplier, v.TargetTokensPerSecond, v.HistoryLimit)
 	if err != nil {
 		return err
 	}

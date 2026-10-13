@@ -61,10 +61,13 @@ type HistogramBucket struct {
 }
 
 type LatencyStats struct {
-	Duration            Percentiles       `json:"duration_ms"`
-	FirstEvent          Percentiles       `json:"first_event_ms"`
-	Histogram           []HistogramBucket `json:"histogram"`
-	FirstEventHistogram []HistogramBucket `json:"first_event_histogram"`
+	Duration   Percentiles `json:"duration_ms"`
+	FirstEvent Percentiles `json:"first_event_ms"`
+	// OutputTokensPerSecond is each streamed call's output tokens over the
+	// time from its first data frame to its end, rounded to whole tokens.
+	OutputTokensPerSecond Percentiles       `json:"output_tokens_per_second"`
+	Histogram             []HistogramBucket `json:"histogram"`
+	FirstEventHistogram   []HistogramBucket `json:"first_event_histogram"`
 }
 
 type InsightBucket struct {

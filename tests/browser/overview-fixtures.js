@@ -390,7 +390,9 @@ const settings = {
   mode: "auto",
   active_collection_id: 1,
   first_event_delay_ms: 0,
+  pacing: "multiplier",
   delay_multiplier: 1,
+  target_tokens_per_second: 100,
   history_limit: 10000,
 };
 const emptyAnalytics = {

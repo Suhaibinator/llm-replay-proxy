@@ -266,6 +266,7 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 	}
 	flusher, _ := w.(http.Flusher)
 	previous := int64(0)
+	multiplier, skipBefore := pacing(entry, s)
 	for i, event := range entry.Revision.Events {
 		if err := r.Context().Err(); err != nil {
 			return first, err
@@ -273,12 +274,12 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 		delay := time.Duration(0)
 		if i == 0 {
 			delay = time.Duration(s.FirstEventDelayMS) * time.Millisecond
-		} else {
-			delta := event.OffsetMS - previous
+		} else if event.OffsetMS > skipBefore {
+			delta := event.OffsetMS - max(previous, skipBefore)
 			if delta < 0 {
 				delta = 0
 			}
-			delay = scaledDelay(delta, s.DelayMultiplier)
+			delay = scaledDelay(delta, multiplier)
 		}
 		if err := h.clock.Sleep(r.Context(), delay); err != nil {
 			return first, err
@@ -290,7 +291,7 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 			flusher.Flush()
 		}
 		previous = event.OffsetMS
-		if first == nil && hasSSEData(event.Data) {
+		if first == nil && protocol.HasSSEData(event.Data) {
 			v := h.clock.Now().Sub(started).Milliseconds()
 			first = &v
 		}
@@ -382,7 +383,7 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 					flusher.Flush()
 				}
 				for _, frame := range parser.Push(chunk) {
-					if firstEvent == nil && hasSSEData(frame) {
+					if firstEvent == nil && protocol.HasSSEData(frame) {
 						v := h.clock.Now().Sub(requestStarted).Milliseconds()
 						firstEvent = &v
 					}
@@ -562,15 +563,6 @@ func decodedBody(resp *http.Response) (io.ReadCloser, error) {
 	}
 }
 
-func hasSSEData(frame string) bool {
-	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
-		if line == "data" || strings.HasPrefix(line, "data:") {
-			return true
-		}
-	}
-	return false
-}
-
 func (h *handler) recordedStateReference(ctx context.Context, collectionID int64, body []byte) (bool, string, error) {
 	refs, err := match.StateReferences(body)
 	if err != nil {
@@ -680,6 +672,29 @@ func normalizeUpstream(u Upstream) Upstream {
 	}
 	u.Headers = normal
 	return u
+}
+
+// pacing returns the multiplier for a replayed stream's gaps and the offset
+// before which gaps are skipped. With multiplier pacing that is the setting
+// itself. With tokens-per-second pacing the keep-alive gaps before the first
+// data frame are skipped (first_event_delay_ms stands in for them) and the
+// rest are scaled so the recording's output tokens stream at the target
+// rate; a recording without a known output token count keeps its recorded
+// cadence after its first data frame.
+func pacing(entry model.Entry, s model.Settings) (multiplier float64, skipBefore int64) {
+	if s.Pacing != model.PacingTokensPerSecond {
+		return s.DelayMultiplier, 0
+	}
+	start, span, ok := protocol.Generation(entry.Revision.Events)
+	if !ok {
+		return 1, 0
+	}
+	summary := protocol.SummarizeResponse(entry.Recording.Route, true, entry.Revision)
+	recorded := protocol.TokensPerSecond(summary.Usage.Output, span)
+	if recorded == nil || s.TargetTokensPerSecond <= 0 {
+		return 1, start
+	}
+	return *recorded / s.TargetTokensPerSecond, start
 }
 
 func scaledDelay(deltaMS int64, multiplier float64) time.Duration {

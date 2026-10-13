@@ -41,7 +41,45 @@ func SummarizeResponse(route string, streaming bool, rev model.Revision) model.R
 	case MessagesRoute:
 		summarizeMessagesStream(&s, objects)
 	}
+	if _, span, ok := Generation(rev.Events); ok {
+		s.GenerationMS = &span
+		s.OutputTokensPerSecond = TokensPerSecond(s.Usage.Output, span)
+	}
 	return s
+}
+
+// HasSSEData reports whether an SSE frame carries a data line, as opposed to
+// only comments (keep-alives) or other fields.
+func HasSSEData(frame string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
+		if line == "data" || strings.HasPrefix(line, "data:") {
+			return true
+		}
+	}
+	return false
+}
+
+// Generation returns the offset of a stream's first data frame and the time
+// from it to the last frame: the span the upstream spent producing output.
+// Frames before it are keep-alives sent while the request was queued. ok is
+// false when no frame carries data.
+func Generation(events []model.Event) (startMS, spanMS int64, ok bool) {
+	for _, e := range events {
+		if HasSSEData(e.Data) {
+			return e.OffsetMS, max(events[len(events)-1].OffsetMS-e.OffsetMS, 0), true
+		}
+	}
+	return 0, 0, false
+}
+
+// TokensPerSecond is tokens over spanMS, or nil when either is unknown or
+// not positive.
+func TokensPerSecond(tokens *int64, spanMS int64) *float64 {
+	if tokens == nil || *tokens <= 0 || spanMS <= 0 {
+		return nil
+	}
+	v := float64(*tokens) * 1000 / float64(spanMS)
+	return &v
 }
 
 // streamObjects decodes every JSON data frame it can, skipping the rest.

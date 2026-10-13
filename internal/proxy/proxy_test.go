@@ -44,6 +44,39 @@ func TestSSEParserReportsIncompleteTail(t *testing.T) {
 	}
 }
 
+func TestTokensPerSecondPacingStreamsOutputAtTheTargetRate(t *testing.T) {
+	events := []model.Event{
+		{Data: ": OPENROUTER PROCESSING\n\n", OffsetMS: 900},
+		{Data: ": OPENROUTER PROCESSING\n\n", OffsetMS: 1900},
+		{Data: `data: {"type":"message_start","message":{"model":"m","usage":{"input_tokens":10}}}` + "\n\n", OffsetMS: 2000},
+		{Data: `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n", OffsetMS: 2500},
+		{Data: `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":150}}` + "\n\n", OffsetMS: 3500},
+	}
+	settings := model.Settings{FirstEventDelayMS: 25, Pacing: model.PacingTokensPerSecond, DelayMultiplier: 7, TargetTokensPerSecond: 50}
+	for _, tc := range []struct {
+		name   string
+		events []model.Event
+		want   []time.Duration
+	}{
+		// Recorded at 150 tokens per 1.5 s = 100 tok/s; at 50 tok/s the
+		// 1.5 s after the first data frame take 3 s. Keep-alive gaps before
+		// it are skipped, and the delay multiplier is ignored.
+		{"with usage", events, []time.Duration{25 * time.Millisecond, 0, 0, time.Second, 2 * time.Second}},
+		// Without an output token count, the recorded cadence is kept.
+		{"without usage", events[:4], []time.Duration{25 * time.Millisecond, 0, 0, 500 * time.Millisecond}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &recordingClock{}
+			h := &handler{clock: clock}
+			entry := model.Entry{Recording: model.Recording{Route: "/v1/messages", Streaming: true}, Revision: model.Revision{Status: 200, Events: tc.events}}
+			h.replay(&flushRecorder{ResponseRecorder: httptest.NewRecorder()}, httptest.NewRequest(http.MethodPost, "/v1/messages", nil), entry, settings)
+			if !reflect.DeepEqual(clock.sleeps, tc.want) {
+				t.Fatalf("sleep durations = %v, want %v", clock.sleeps, tc.want)
+			}
+		})
+	}
+}
+
 func TestScaledDelayKeepsFractionalMillisecondsAndCapsOverflow(t *testing.T) {
 	if got := scaledDelay(1, .5); got != 500*time.Microsecond {
 		t.Fatalf("scaled delay = %v", got)

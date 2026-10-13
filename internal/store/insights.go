@@ -7,11 +7,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/fnv"
+	"math"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/local/llm-replay-proxy/internal/model"
+	"github.com/local/llm-replay-proxy/internal/protocol"
 )
 
 // historyRow is one history row with the summaries the dashboard reads: its
@@ -184,7 +186,7 @@ func histogram(values []int64) []model.HistogramBucket {
 	return out
 }
 
-type latencySet struct{ durations, firsts []int64 }
+type latencySet struct{ durations, firsts, speeds []int64 }
 
 func (l *latencySet) add(r *historyRow) {
 	if r.duration != nil {
@@ -193,11 +195,16 @@ func (l *latencySet) add(r *historyRow) {
 	if r.first != nil {
 		l.firsts = append(l.firsts, *r.first)
 	}
+	if r.duration != nil && r.first != nil && r.resp != nil {
+		if v := protocol.TokensPerSecond(r.resp.Usage.Output, *r.duration-*r.first); v != nil {
+			l.speeds = append(l.speeds, int64(math.Round(*v)))
+		}
+	}
 }
 
 func (l *latencySet) stats() model.LatencyStats {
 	return model.LatencyStats{
-		Duration: percentiles(l.durations), FirstEvent: percentiles(l.firsts),
+		Duration: percentiles(l.durations), FirstEvent: percentiles(l.firsts), OutputTokensPerSecond: percentiles(l.speeds),
 		Histogram: histogram(l.durations), FirstEventHistogram: histogram(l.firsts),
 	}
 }

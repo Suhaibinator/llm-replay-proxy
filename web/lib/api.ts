@@ -7,15 +7,24 @@ export type Collection = {
   exclusions: string[];
   created_at: string;
 };
+/** How replayed streams space frames after the first. */
+export type Pacing = "multiplier" | "tokens_per_second";
 export type Settings = {
   mode: "record" | "replay" | "auto";
   active_collection_id: number;
   first_event_delay_ms: number;
+  /** multiplier scales recorded gaps by delay_multiplier; tokens_per_second
+   *  scales each recording so its output streams at target_tokens_per_second. */
+  pacing: Pacing;
   delay_multiplier: number;
+  target_tokens_per_second: number;
   history_limit: number;
 };
 export type NumberSetting =
-  "first_event_delay_ms" | "delay_multiplier" | "history_limit";
+  | "first_event_delay_ms"
+  | "delay_multiplier"
+  | "target_tokens_per_second"
+  | "history_limit";
 export type Event = { data: string; offset_ms: number };
 export type Revision = {
   id: number;
@@ -139,7 +148,9 @@ export const defaults: Settings = {
   mode: "replay",
   active_collection_id: 0,
   first_event_delay_ms: 0,
+  pacing: "multiplier",
   delay_multiplier: 1,
+  target_tokens_per_second: 100,
   history_limit: 10000,
 };
 export class APIError extends Error {
@@ -240,6 +251,10 @@ export type ResponseSummary = {
   output_chars: number;
   reasoning_chars: number;
   tool_calls: number;
+  /** Streams: ms from the first data frame to the last, as recorded. */
+  generation_ms: number | null;
+  /** usage.output over generation_ms: the upstream's output speed. */
+  output_tokens_per_second: number | null;
 };
 
 /** Sums over many responses; each field sums only reported values. */
@@ -274,6 +289,8 @@ export type LatencyStats = {
   histogram: Histogram;
   /** First-event histogram (streams only), same buckets. */
   first_event_histogram: Histogram;
+  /** Streamed calls' output tokens over the time after their first event. */
+  output_tokens_per_second: Percentiles;
 };
 
 export type InsightBucket = OutcomeCounts & {

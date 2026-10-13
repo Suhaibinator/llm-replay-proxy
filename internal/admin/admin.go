@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"maps"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,7 +27,6 @@ import (
 
 const maxImportSize = 1 << 30
 const maxEditSize = 128 << 20
-const maxDelayMultiplier = 1_000_000
 const maxDelayMS = int64(24 * time.Hour / time.Millisecond)
 
 type handler struct{ db *store.Store }
@@ -257,8 +255,8 @@ func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_settings", fmt.Sprintf("first_event_delay_ms must be between 0 and %d", maxDelayMS))
 			return
 		}
-		if v.DelayMultiplier < 0 || math.IsNaN(v.DelayMultiplier) || math.IsInf(v.DelayMultiplier, 0) || v.DelayMultiplier > maxDelayMultiplier {
-			writeError(w, http.StatusBadRequest, "invalid_settings", fmt.Sprintf("delay_multiplier must be between 0 and %d", maxDelayMultiplier))
+		if err := store.ValidatePacing(v); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_settings", err.Error())
 			return
 		}
 		if v.HistoryLimit < 0 || v.HistoryLimit > store.MaxHistoryLimit {

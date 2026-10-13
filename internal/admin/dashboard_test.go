@@ -64,7 +64,7 @@ func TestDashboardEndpoints(t *testing.T) {
 	if totals["requests"] != 3.0 || totals["hit_rate"] != 1.0/3 || totals["saved_cost"] != nil || totals["threads"] != 1.0 {
 		t.Fatalf("totals %v", totals)
 	}
-	if got := keys(raw["latency"].(map[string]any)["replay"].(map[string]any)); got != "duration_ms,first_event_histogram,first_event_ms,histogram" {
+	if got := keys(raw["latency"].(map[string]any)["replay"].(map[string]any)); got != "duration_ms,first_event_histogram,first_event_ms,histogram,output_tokens_per_second" {
 		t.Fatalf("latency keys %s", got)
 	}
 	if w = request(t, h, http.MethodGet, "/api/insights?collection_id="+cid+"&model=nope", nil); !strings.Contains(w.Body.String(), `"requests":0`) {
@@ -96,7 +96,7 @@ func TestDashboardEndpoints(t *testing.T) {
 	if turn["route"] != "/v1/chat/completions" || turn["source"] != "upstream" {
 		t.Fatalf("turn route/source %v", turn)
 	}
-	if got := keys(turn["response"].(map[string]any)); got != "cost,model,outcome,output_chars,reasoning_chars,tool_calls,usage" {
+	if got := keys(turn["response"].(map[string]any)); got != "cost,generation_ms,model,outcome,output_chars,output_tokens_per_second,reasoning_chars,tool_calls,usage" {
 		t.Fatalf("response keys %s", got)
 	}
 

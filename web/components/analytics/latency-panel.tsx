@@ -51,6 +51,10 @@ export function LatencyPanel({
   const xFirst = speedup(up.first_event_ms, re.first_event_ms);
   const metricLabel =
     m === "duration" ? "total duration" : "time to first event";
+  const speeds = SOURCES.map((src) => ({
+    ...src,
+    ...pick((src.key === "upstream" ? up : re).output_tokens_per_second),
+  }));
   const val = (r: HistogramRow, k: string) =>
     scale === "share"
       ? k === "upstream"
@@ -260,6 +264,39 @@ export function LatencyPanel({
               )}
               {xFirst != null && " to the first event"} than upstream.
             </p>
+          )}
+          {speeds.some((s) => s.samples > 0) && (
+            <div className="mt-3">
+              <p className="mb-1 text-xs font-medium text-muted-foreground">
+                Output speed after the first event
+              </p>
+              <dl className="grid grid-cols-2 gap-3">
+                {speeds.map((s) => (
+                  <div
+                    key={s.key}
+                    className="min-w-0 rounded-lg border px-3 py-2"
+                    title={`${formatExact(s.samples)} streamed ${s.samples === 1 ? "call" : "calls"} with an output token count`}
+                  >
+                    <dt className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <span
+                        className="inline-block size-2 rounded-full"
+                        style={{ background: s.color }}
+                        aria-hidden
+                      />
+                      {s.label}
+                    </dt>
+                    <dd className="text-sm font-semibold tabular-nums">
+                      {s.p50 == null ? "—" : `${formatExact(s.p50)} tok/s`}
+                      {s.p95 != null && (
+                        <span className="ml-1 text-xs font-normal text-muted-foreground">
+                          p95 {formatExact(s.p95)}
+                        </span>
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
           )}
         </div>
       </div>

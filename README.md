@@ -117,7 +117,9 @@ Select a collection and mode in the control panel:
 
 Live bytes are forwarded as they arrive. Streams retain ordered raw SSE frames and relative timestamps. Non-streaming bodies retain their original bytes. Only complete, successful protocol responses become active recordings; an error or interrupted refresh preserves the previous revision. The proxy does not retry upstream requests.
 
-Timing controls set the first event delay and a multiplier for later recorded delays. Set both to zero for instant playback. Each replay event is flushed, and disconnecting cancels playback.
+Timing controls set the first event delay, then pace later events one of two ways: a **delay multiplier** scales every recorded gap (1 is the original speed, 0 sends events back to back), or a **target output speed** in tokens per second scales each recording's gaps so its output streams at that rate while keeping its rhythm. With a target speed, waits before the first data event (keep-alives sent while the upstream queued the request) are skipped, and a recording without a provider-reported output token count keeps its recorded speed. Instant playback is a zero first event delay with a zero multiplier. Each replay event is flushed, and disconnecting cancels playback. Pacing applies to streamed responses; JSON responses are always returned at once.
+
+Output speed is measured as output tokens over the time from a stream's first data event to its last. The recording inspector shows each recording's speed as recorded upstream, and the latency panel compares the median speed of upstream and replayed calls.
 
 Traffic refreshes automatically every five seconds without replacing settings
 or editor drafts. The dashboard can analyze any collection without activating

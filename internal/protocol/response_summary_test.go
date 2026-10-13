@@ -140,7 +140,9 @@ func TestSummarizeResponse(t *testing.T) {
 			if (got.Cost == nil) != (tc.want.Cost == nil) || (got.Cost != nil && *got.Cost != *tc.want.Cost) {
 				t.Errorf("cost %v, want %v", got.Cost, tc.want.Cost)
 			}
+			// Timing is covered by TestSummarizeResponseMeasuresOutputSpeed.
 			got.Usage, got.Cost, tc.want.Usage, tc.want.Cost = model.TokenUsage{}, nil, model.TokenUsage{}, nil
+			got.GenerationMS, got.OutputTokensPerSecond = nil, nil
 			if got != tc.want {
 				t.Errorf("summary %+v, want %+v", got, tc.want)
 			}
@@ -153,8 +155,34 @@ func TestSummarizeResponseNullsAreSerialized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model":"m","outcome":"stop","usage":{"input":null,"cached_input":null,"output":null,"reasoning":null,"total":null},"cost":null,"output_chars":1,"reasoning_chars":0,"tool_calls":0}`
+	want := `{"model":"m","outcome":"stop","usage":{"input":null,"cached_input":null,"output":null,"reasoning":null,"total":null},"cost":null,"output_chars":1,"reasoning_chars":0,"tool_calls":0,"generation_ms":null,"output_tokens_per_second":null}`
 	if string(b) != want {
 		t.Fatalf("got  %s\nwant %s", b, want)
+	}
+}
+
+func TestSummarizeResponseMeasuresOutputSpeed(t *testing.T) {
+	events := []model.Event{
+		{Data: ": OPENROUTER PROCESSING\n\n", OffsetMS: 900},
+		{Data: ": OPENROUTER PROCESSING\n\n", OffsetMS: 1900},
+		{Data: `data: {"type":"message_start","message":{"model":"m","usage":{"input_tokens":10}}}` + "\n\n", OffsetMS: 2000},
+		{Data: `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n", OffsetMS: 2500},
+		{Data: `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":150}}` + "\n\n", OffsetMS: 3500},
+	}
+	got := SummarizeResponse(MessagesRoute, true, model.Revision{Events: events})
+	// 150 tokens over the 1500 ms from the first data frame to the last.
+	if got.GenerationMS == nil || *got.GenerationMS != 1500 || got.OutputTokensPerSecond == nil || *got.OutputTokensPerSecond != 100 {
+		t.Fatalf("generation %v ms, %v tok/s", got.GenerationMS, got.OutputTokensPerSecond)
+	}
+	if start, span, ok := Generation(events); !ok || start != 2000 || span != 1500 {
+		t.Fatalf("Generation: %d %d %v", start, span, ok)
+	}
+	if _, _, ok := Generation(events[:2]); ok {
+		t.Fatal("a stream of keep-alives has no generation span")
+	}
+	// Without an output token count the span is known but the speed is not.
+	noUsage := SummarizeResponse(MessagesRoute, true, model.Revision{Events: events[:4]})
+	if noUsage.GenerationMS == nil || *noUsage.GenerationMS != 500 || noUsage.OutputTokensPerSecond != nil {
+		t.Fatalf("without usage: %v ms, %v tok/s", noUsage.GenerationMS, noUsage.OutputTokensPerSecond)
 	}
 }

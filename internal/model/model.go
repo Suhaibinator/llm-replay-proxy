@@ -101,6 +101,12 @@ type ResponseSummary struct {
 	OutputChars    int      `json:"output_chars"`
 	ReasoningChars int      `json:"reasoning_chars"`
 	ToolCalls      int      `json:"tool_calls"`
+	// GenerationMS is how long a stream took from its first data frame to its
+	// last frame as recorded; nil for a JSON body or a stream with no data.
+	GenerationMS *int64 `json:"generation_ms"`
+	// OutputTokensPerSecond is Usage.Output over GenerationMS, the speed the
+	// upstream produced this response at; nil when either is unknown or zero.
+	OutputTokensPerSecond *float64 `json:"output_tokens_per_second"`
 }
 
 type Entry struct {
@@ -159,11 +165,24 @@ type Analytics struct {
 	Sources       map[string]SourceAnalytics `json:"sources"`
 	Series        []AnalyticsPoint           `json:"series"`
 }
+
+// Replay pacing modes.
+const (
+	PacingMultiplier      = "multiplier"
+	PacingTokensPerSecond = "tokens_per_second"
+)
+
 type Settings struct {
-	Mode               string  `json:"mode"`
-	ActiveCollectionID int64   `json:"active_collection_id"`
-	FirstEventDelayMS  int64   `json:"first_event_delay_ms"`
-	DelayMultiplier    float64 `json:"delay_multiplier"`
+	Mode               string `json:"mode"`
+	ActiveCollectionID int64  `json:"active_collection_id"`
+	// FirstEventDelayMS delays a replayed stream's first frame.
+	FirstEventDelayMS int64 `json:"first_event_delay_ms"`
+	// Pacing chooses how later frames are spaced: PacingMultiplier scales the
+	// recorded gaps by DelayMultiplier; PacingTokensPerSecond scales each
+	// recording's gaps so its output streams at TargetTokensPerSecond.
+	Pacing                string  `json:"pacing"`
+	DelayMultiplier       float64 `json:"delay_multiplier"`
+	TargetTokensPerSecond float64 `json:"target_tokens_per_second"`
 	// HistoryLimit is the number of history rows kept per collection; 0 keeps
 	// every row.
 	HistoryLimit int64 `json:"history_limit"`

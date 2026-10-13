@@ -414,3 +414,34 @@ func TestNearestRanksSameThreadThenSharedContent(t *testing.T) {
 		t.Fatalf("bodiless row: %+v %v", none, err)
 	}
 }
+
+func TestInsightsMeasuresOutputTokensPerSecond(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	cid := int64(1)
+	base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	req := chatRequest("gpt-a", "hello")
+	rec := publishChat(t, s, cid, req, chatResponse("gpt-a", `{"prompt_tokens":10,"completion_tokens":50}`))
+	body, _ := json.Marshal(req, json.Deterministic(true))
+	for i, r := range []struct {
+		source          string
+		duration, first *int64
+	}{
+		{"upstream", ms(1100), ms(100)}, // 50 tokens over 1 s
+		{"replay", ms(600), ms(100)},    // over 0.5 s
+		{"replay", ms(350), ms(100)},    // over 0.25 s
+		{"replay", ms(600), nil},        // no first event: not measured
+		{"replay", ms(100), ms(100)},    // nothing after the first event: not measured
+	} {
+		addHistory(t, s, model.History{CollectionID: cid, Route: chatRoute, Key: "k", Request: body, Outcome: "hit", CacheStatus: "hit", Source: r.source,
+			RecordingID: rec.Recording.ID, RevisionID: rec.Revision.ID, DurationMS: r.duration, FirstEventMS: r.first, CreatedAt: base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano)})
+	}
+	in, err := s.Insights(ctx, cid, base, base.Add(time.Hour), InsightFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, replay := in.Latency.Upstream.OutputTokensPerSecond, in.Latency.Replay.OutputTokensPerSecond
+	if up.Samples != 1 || *up.P50 != 50 || replay.Samples != 2 || *replay.P50 != 100 || *replay.P95 != 200 {
+		t.Fatalf("upstream %+v, replay %+v", up, replay)
+	}
+}

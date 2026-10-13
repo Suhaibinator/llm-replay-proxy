@@ -26,7 +26,7 @@ issues, refreshes, lists, or revokes tokens.
 
 | Endpoint | Method | Request / result |
 | --- | --- | --- |
-| `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `delay_multiplier`, `history_limit` |
+| `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `pacing` (`multiplier` or `tokens_per_second`), `delay_multiplier`, `target_tokens_per_second` (> 0), `history_limit` |
 | `/api/collections` | GET, POST | POST `{name, exclusions}`; matching rules remain immutable |
 | `/api/collections/N` | DELETE | 204; deletes the collection, its recordings and its history. 409 `collection_active` for the active collection |
 | `/api/recordings?collection_id=N` | GET | Recordings, newest first, each with a request summary (`request`), the active revision's response summary (`response`), `updated_at`, active revision `source`, `revisions`, `hits` and `last_hit_at` |
