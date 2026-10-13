@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -24,7 +24,7 @@ func publishChat(t *testing.T, s *Store, cid int64, request any, response string
 
 func publishRoute(t *testing.T, s *Store, cid int64, route string, request any, response string) model.Entry {
 	t.Helper()
-	req, err := json.Marshal(request)
+	req, err := json.Marshal(request, json.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +75,9 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	b1 := publishChat(t, s, cid, bReq, chatResponse("", `{"prompt_tokens":10,"completion_tokens":5}`))
 	// A later edit must not change what earlier rows are attributed.
 	a2 := publishChat(t, s, cid, aReq, chatResponse("gpt-a-2025", `{"prompt_tokens":999,"completion_tokens":1}`))
-	aBody, _ := json.Marshal(aReq)
-	bBody, _ := json.Marshal(bReq)
-	missBody, _ := json.Marshal(chatRequest("gpt-a", "never recorded"))
+	aBody, _ := json.Marshal(aReq, json.Deterministic(true))
+	bBody, _ := json.Marshal(bReq, json.Deterministic(true))
+	missBody, _ := json.Marshal(chatRequest("gpt-a", "never recorded"), json.Deterministic(true))
 
 	row := func(minute int, outcome, lookup, source string, body []byte, rec model.Entry, revision int64, duration *int64) {
 		addHistory(t, s, model.History{CollectionID: cid, Route: chatRoute, Key: "k", Request: body, Outcome: outcome, CacheStatus: lookup, Source: source,
@@ -202,7 +202,7 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if err != nil || empty.Totals.HitRate != nil || empty.Totals.UpstreamCost != nil || empty.Models == nil || empty.TopThreads == nil {
 		t.Fatalf("empty insights %+v %v", empty.Totals, err)
 	}
-	b, _ := json.Marshal(empty)
+	b, _ := json.Marshal(empty, json.Deterministic(true))
 	var generic map[string]any
 	_ = json.Unmarshal(b, &generic)
 	if _, ok := generic["latency"].(map[string]any)["upstream"].(map[string]any)["histogram"].([]any); !ok {
@@ -214,7 +214,7 @@ func TestDeletedRecordingKeepsHistoryButDropsAttribution(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
 	e := publishChat(t, s, 1, chatRequest("m", "x"), chatResponse("m", `{"prompt_tokens":5,"completion_tokens":1}`))
-	body, _ := json.Marshal(chatRequest("m", "x"))
+	body, _ := json.Marshal(chatRequest("m", "x"), json.Deterministic(true))
 	now := time.Now().UTC()
 	addHistory(t, s, model.History{CollectionID: 1, Route: chatRoute, Key: "k", Request: body, Outcome: "hit", RecordingID: e.Recording.ID, RevisionID: e.Revision.ID, CreatedAt: now.Format(time.RFC3339Nano)})
 	if err := s.DeleteRecording(ctx, e.Recording.ID); err != nil {
@@ -240,7 +240,7 @@ func TestThreadsGroupByConversationAndListTurns(t *testing.T) {
 	r1 := publishChat(t, s, cid, turn1, chatResponse("m-1", `{"prompt_tokens":10,"completion_tokens":2}`))
 	r2 := publishChat(t, s, cid, turn2, chatResponse("m-1", `{"prompt_tokens":30,"completion_tokens":4}`))
 	other := chatRequest("m", "unrelated")
-	body := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	body := func(v any) []byte { b, _ := json.Marshal(v, json.Deterministic(true)); return b }
 
 	add := func(minute int, outcome string, req any, rec model.Entry) {
 		h := model.History{CollectionID: cid, Route: chatRoute, Key: "k", Outcome: outcome, RecordingID: rec.Recording.ID, CreatedAt: at(minute)}
@@ -341,7 +341,7 @@ func TestNearestComparesSmallRequestsWithFineChunks(t *testing.T) {
 	similar := publishChat(t, s, 1, ask("m", "what is the refund policy for annual plans?"), resp)
 	publishChat(t, s, 1, ask("other-model", "what is the refund policy for annual plans?"), resp)
 	publishChat(t, s, 1, chatRequest("m", "unrelated"), resp)
-	body, _ := json.Marshal(ask("m", "what is the refund policy for monthly plans?"))
+	body, _ := json.Marshal(ask("m", "what is the refund policy for monthly plans?"), json.Deterministic(true))
 	addHistory(t, s, model.History{CollectionID: 1, Route: chatRoute, Key: "k", Request: body, Outcome: "miss"})
 	rows, _ := s.History(ctx, 1, 1)
 	got, err := s.Nearest(ctx, rows[0].ID)
@@ -388,7 +388,7 @@ func TestNearestRanksSameThreadThenSharedContent(t *testing.T) {
 	sharedContent := publishRoute(t, s, cid, "/v1/responses", request("a different question"), resp)
 	publishRoute(t, s, cid, "/v1/responses", map[string]any{"model": "m", "input": "tiny unrelated " + bigText(2, 8<<10)}, resp)
 	exact := publishRoute(t, s, cid, "/v1/responses", missed, resp)
-	body, _ := json.Marshal(missed)
+	body, _ := json.Marshal(missed, json.Deterministic(true))
 	addHistory(t, s, model.History{CollectionID: cid, Route: "/v1/responses", Key: exact.Recording.Key, Request: body, Outcome: "miss"})
 	rows, err := s.History(ctx, cid, 1)
 	if err != nil {

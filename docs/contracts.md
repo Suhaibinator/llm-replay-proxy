@@ -122,9 +122,18 @@ with no `response.output_text.delta` event to rewrite.
 
 Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
 exclusions also matches as `[]`. The key is the SHA-256 of the matching input
-`{"version":2,"api":…,"body":…}`, where `api` is `chat_completions`,
+`{"version":3,"api":…,"body":…}`, where `api` is `chat_completions`,
 `responses` or `messages` and `body` is the canonical request after collection
-exclusions. The upstream provider, URL and headers are not part of it, so a
+exclusions. Canonical JSON is RFC 8785 (JCS) via `encoding/json/jsontext`:
+sorted member names, minimal string escapes and no whitespace. Numbers are the
+one exception: they keep their exact lexeme rather than being rounded through
+float64, so `1` and `1.0` differ. Duplicate member names, invalid UTF-8 and
+unpaired surrogate escapes are rejected. Exclusions apply to the request as sent. Then the `tools` array is
+sorted by each tool's canonical JSON, and JSON objects or arrays embedded in
+tool-call argument and tool-result strings are re-encoded canonically (sorted
+keys, no whitespace, exact numbers), still as strings. Other strings are never
+reinterpreted. The comparison API diffs the requests after the same
+normalization, so tool paths use the sorted order. The upstream provider, URL and headers are not part of it, so a
 recording replays whichever provider a request selects. The input is derived
 whenever it is displayed and is not stored.
 

@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 
@@ -157,7 +157,7 @@ func internBody(ctx context.Context, tx *sql.Tx, raw []byte) (int64, error) {
 
 // loadBody reassembles a body and verifies it against its stored size and hash,
 // so a damaged or forged chunk can never be returned as request bytes.
-func loadBody(ctx context.Context, q querier, id int64) (json.RawMessage, error) {
+func loadBody(ctx context.Context, q querier, id int64) (jsontext.Value, error) {
 	var hash, manifest []byte
 	var size int64
 	err := q.QueryRowContext(ctx, "SELECT hash,size,chunks FROM bodies WHERE id=?", id).Scan(&hash, &size, &manifest)
@@ -216,11 +216,11 @@ func loadBody(ctx context.Context, q querier, id int64) (json.RawMessage, error)
 }
 
 // bodyCache loads each body once per read, since many rows share a body.
-type bodyCache map[int64]json.RawMessage
+type bodyCache map[int64]jsontext.Value
 
-func (c bodyCache) load(ctx context.Context, q querier, id sql.NullInt64) (json.RawMessage, error) {
+func (c bodyCache) load(ctx context.Context, q querier, id sql.NullInt64) (jsontext.Value, error) {
 	if !id.Valid {
-		return json.RawMessage(`null`), nil
+		return jsontext.Value(`null`), nil
 	}
 	if b, ok := c[id.Int64]; ok {
 		return b, nil

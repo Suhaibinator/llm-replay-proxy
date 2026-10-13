@@ -1,6 +1,6 @@
 package model
 
-import "encoding/json"
+import "encoding/json/jsontext"
 
 type Collection struct {
 	ID         int64    `json:"id"`
@@ -19,11 +19,11 @@ type Recording struct {
 	Route        string `json:"route"`
 	// Request and MatchingInput are never serialized: request bytes are served
 	// once, as exact text, by the endpoints that need them.
-	Request          json.RawMessage `json:"-"`
-	MatchingInput    json.RawMessage `json:"-"`
-	Streaming        bool            `json:"streaming"`
-	ActiveRevisionID int64           `json:"active_revision_id"`
-	CreatedAt        string          `json:"created_at"`
+	Request          jsontext.Value `json:"-"`
+	MatchingInput    jsontext.Value `json:"-"`
+	Streaming        bool           `json:"streaming"`
+	ActiveRevisionID int64          `json:"active_revision_id"`
+	CreatedAt        string         `json:"created_at"`
 }
 type Revision struct {
 	ID            int64             `json:"id"`
@@ -32,8 +32,8 @@ type Revision struct {
 	Headers       map[string]string `json:"headers"`
 	Body          string            `json:"body"`
 	Events        []Event           `json:"events"`
-	Request       json.RawMessage   `json:"-"`
-	MatchingInput json.RawMessage   `json:"-"`
+	Request       jsontext.Value    `json:"-"`
+	MatchingInput jsontext.Value    `json:"-"`
 	Source        string            `json:"source"`
 	CreatedAt     string            `json:"created_at"`
 }
@@ -113,9 +113,9 @@ type History struct {
 	Route        string `json:"route"`
 	// Provider names the configured upstream provider the request selected
 	// (explicitly or by default); empty when none could be resolved.
-	Provider string          `json:"provider"`
-	Key      string          `json:"key"`
-	Request  json.RawMessage `json:"-"`
+	Provider string         `json:"provider"`
+	Key      string         `json:"key"`
+	Request  jsontext.Value `json:"-"`
 	// Summary describes Request; nil when the call had no request body.
 	Summary     *RequestSummary `json:"request"`
 	Outcome     string          `json:"outcome"`

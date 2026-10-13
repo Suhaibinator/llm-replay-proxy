@@ -8,7 +8,7 @@ package devseed
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/match"
 	"github.com/local/llm-replay-proxy/internal/model"
 	"github.com/local/llm-replay-proxy/internal/store"
@@ -296,7 +297,7 @@ func request(p profile, system string, past []turn, user string, streaming bool)
 	if streaming {
 		body["stream"] = true
 	}
-	b, _ := json.Marshal(body)
+	b, _ := jsontree.Marshal(body)
 	return b
 }
 
@@ -472,7 +473,7 @@ func (s *seeder) record(ctx context.Context, p profile, streaming bool, key stri
 		var body map[string]any
 		_ = json.Unmarshal(req, &body)
 		body["temperature"] = math.Round(s.r.Float64()*10) / 10
-		variant, _ := json.Marshal(body)
+		variant, _ := jsontree.Marshal(body)
 		vkey, _, err := match.Key(p.route, variant, nil)
 		if err != nil {
 			return err

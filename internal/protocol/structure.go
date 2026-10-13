@@ -1,11 +1,11 @@
 package protocol
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -32,11 +32,11 @@ func validateStructure(route string, streaming bool, rev model.Revision) error {
 }
 
 func indexField(o map[string]any, field string) (int, error) {
-	n, ok := o[field].(json.Number)
+	n, ok := jsontree.Number(o[field])
 	if !ok {
 		return 0, fmt.Errorf("%s must be a nonnegative integer", field)
 	}
-	i, err := strconv.ParseInt(string(n), 10, 32)
+	i, err := strconv.ParseInt(n, 10, 32)
 	if err != nil || i < 0 {
 		return 0, fmt.Errorf("%s must be a nonnegative integer", field)
 	}
@@ -564,8 +564,8 @@ func checkResponseItem(it *responseItem, item map[string]any, final bool) error 
 		}
 	}
 	if final && it.snapshot != nil {
-		prior, _ := json.Marshal(it.snapshot["content"])
-		current, _ := json.Marshal(item["content"])
+		prior, _ := jsontree.Marshal(it.snapshot["content"])
+		current, _ := jsontree.Marshal(item["content"])
 		if string(prior) != string(current) {
 			return fmt.Errorf("output_item.done content disagrees with final output")
 		}

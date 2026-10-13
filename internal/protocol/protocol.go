@@ -3,13 +3,13 @@
 package protocol
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -183,7 +183,7 @@ func parseFrame(raw string) (frame, error) {
 }
 
 func replaceFrameData(raw string, value any) (string, error) {
-	b, err := json.Marshal(value)
+	b, err := jsontree.Marshal(value)
 	if err != nil {
 		return "", err
 	}
@@ -215,37 +215,27 @@ func replaceFrameData(raw string, value any) (string, error) {
 }
 
 func decodeObject(s string) (map[string]any, error) {
-	dec := json.NewDecoder(strings.NewReader(s))
-	dec.UseNumber()
-	var v map[string]any
-	if err := dec.Decode(&v); err != nil {
+	v, err := jsontree.Decode([]byte(s), jsontree.Lenient...)
+	if err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
-	if v == nil {
+	o, ok := v.(map[string]any)
+	if !ok {
 		return nil, errors.New("JSON value must be an object")
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return nil, errors.New("JSON has trailing data")
-	}
-	return v, nil
+	return o, nil
 }
 
 func bodyObject(body string) (map[string]any, error) {
-	dec := json.NewDecoder(strings.NewReader(body))
-	dec.UseNumber()
-	var v map[string]any
-	if err := dec.Decode(&v); err != nil {
+	v, err := jsontree.Decode([]byte(body), jsontree.Lenient...)
+	if err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
-	if v == nil {
+	o, ok := v.(map[string]any)
+	if !ok {
 		return nil, errors.New("JSON value must be an object")
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return nil, errors.New("JSON has trailing data")
-	}
-	return v, nil
+	return o, nil
 }
 
 func eventObjects(rev model.Revision) ([]frame, []map[string]any, error) {
@@ -514,7 +504,7 @@ func responseOutputText(response map[string]any, classify bool) (string, string,
 		if item["type"] != "message" {
 			if item["type"] == "function_call" {
 				args, ok := asString(item["arguments"])
-				if !ok || !json.Valid([]byte(args)) {
+				if !ok || !jsontext.Value(args).IsValid(jsontree.Lenient...) {
 					return "", "", errors.New("response function call has malformed arguments")
 				}
 			}
@@ -815,7 +805,7 @@ func cloneRevision(r model.Revision) model.Revision {
 	n.Events = append([]model.Event(nil), r.Events...)
 	return n
 }
-func marshalBody(o map[string]any) (string, error) { b, e := json.Marshal(o); return string(b), e }
+func marshalBody(o map[string]any) (string, error) { b, e := jsontree.Marshal(o); return string(b), e }
 
 func editChat(r *model.Revision, stream bool, text string) error {
 	if !stream {

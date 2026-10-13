@@ -6,7 +6,8 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/match"
 	"github.com/local/llm-replay-proxy/internal/model"
 	"github.com/local/llm-replay-proxy/internal/protocol"
@@ -128,15 +130,14 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 413, "request_too_large", "request body exceeds 64 MiB")
 		return
 	}
-	var request map[string]any
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	if err := dec.Decode(&request); err != nil || request == nil {
-		writeError(w, 400, "invalid_json", "request body must be a JSON object")
+	value, err := jsontree.Decode(body)
+	if err != nil {
+		writeError(w, 400, "invalid_json", "request body must contain exactly one JSON object")
 		return
 	}
-	if err := ensureJSONEOF(dec); err != nil {
-		writeError(w, 400, "invalid_json", "request body must contain exactly one JSON object")
+	request, ok := value.(map[string]any)
+	if !ok {
+		writeError(w, 400, "invalid_json", "request body must be a JSON object")
 		return
 	}
 	streaming := false
@@ -631,18 +632,7 @@ func copyResponseHeaders(dst http.Header, src map[string]string) {
 		dst.Set(k, v)
 	}
 }
-func clone(value []byte) json.RawMessage { return append(json.RawMessage(nil), value...) }
-func ensureJSONEOF(dec *json.Decoder) error {
-	var extra any
-	err := dec.Decode(&extra)
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err == nil {
-		return errors.New("extra JSON value")
-	}
-	return err
-}
+func clone(value []byte) jsontext.Value { return jsontext.Value(value).Clone() }
 
 type limitedCapture struct {
 	buf      bytes.Buffer
@@ -706,7 +696,7 @@ func scaledDelay(deltaMS int64, multiplier float64) time.Duration {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": message}})
+	_ = json.MarshalWrite(w, map[string]any{"error": map[string]string{"code": code, "message": message}}, jsontree.Stable...)
 }
 
 // sseParser recognizes both LF and CRLF event delimiters while retaining bytes.

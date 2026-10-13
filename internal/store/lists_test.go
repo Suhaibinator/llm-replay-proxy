@@ -77,6 +77,43 @@ func TestHistoryAfterReturnsOnlyNewerRows(t *testing.T) {
 	}
 }
 
+func TestHistoryBeforePagesBackAndFiltersOutcomes(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	outcomes := []string{"hit", "miss", "error", "hit", "miss"}
+	for i, o := range outcomes {
+		addHistory(t, s, model.History{CollectionID: 1, Key: fmt.Sprint(i), Outcome: o})
+	}
+	all, err := s.HistoryBefore(ctx, 1, 0, 10, "", nil)
+	if err != nil || len(all) != 5 {
+		t.Fatalf("all: %d %v", len(all), err)
+	}
+	older, err := s.HistoryBefore(ctx, 1, all[1].ID, 2, "", nil)
+	if err != nil || len(older) != 2 || older[0].ID != all[2].ID || older[1].ID != all[3].ID {
+		t.Fatalf("before %d: %+v %v", all[1].ID, older, err)
+	}
+	failed, err := s.HistoryBefore(ctx, 1, 0, 10, "", []string{"miss", "error"})
+	if err != nil || len(failed) != 3 || failed[0].Outcome != "miss" || failed[1].Outcome != "error" || failed[2].Outcome != "miss" {
+		t.Fatalf("failures: %+v %v", failed, err)
+	}
+}
+
+func TestRevisionDetailLoadsItsRequest(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	first := publishOne(t, s, testRecording(1, "a"), testRevision("resp_1", "recorded"))
+	if _, err := s.Publish(ctx, testRecording(1, "a"), testRevision("resp_2", "recorded")); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.RevisionDetail(ctx, first.Recording.ID, first.Revision.ID)
+	if err != nil || v.ID != first.Revision.ID || string(v.Request) != string(first.Recording.Request) || len(v.MatchingInput) == 0 || len(v.Events) != 3 {
+		t.Fatalf("detail: %+v %v", v, err)
+	}
+	if _, err := s.RevisionDetail(ctx, first.Recording.ID+1, first.Revision.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other recording: %v", err)
+	}
+}
+
 func bodyCount(t *testing.T, s *Store) (bodies, chunks int64) {
 	bodies, chunks, _ = storedBytes(t, s)
 	return

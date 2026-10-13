@@ -3,7 +3,8 @@ package admin
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"io"
 	"maps"
 	"net/http"
@@ -34,7 +35,7 @@ func request(t *testing.T, h http.Handler, method, target string, body any) *htt
 	t.Helper()
 	var r io.Reader
 	if body != nil {
-		b, err := json.Marshal(body)
+		b, err := json.Marshal(body, json.Deterministic(true))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,7 +152,7 @@ func TestInspectEditRestoreCompareAndHistory(t *testing.T) {
 	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`/messages/0/content`)) || !bytes.Contains(w.Body.Bytes(), []byte(`/temperature`)) {
 		t.Fatalf("compare: %d %s", w.Code, w.Body.String())
 	}
-	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: "k", Request: json.RawMessage(`{"model":"m","messages":[{"role":"user","content":"from history"}],"large":9007199254740993}`), Outcome: "miss"}); err != nil {
+	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: "k", Request: jsontext.Value(`{"model":"m","messages":[{"role":"user","content":"from history"}],"large":9007199254740993}`), Outcome: "miss"}); err != nil {
 		t.Fatal(err)
 	}
 	w = request(t, h, http.MethodGet, "/api/history?collection_id="+itoa(e.Recording.CollectionID), nil)
@@ -200,12 +201,12 @@ func TestLazyRevisionInspectionPreservesDetailsAndScope(t *testing.T) {
 		full := request(t, h, http.MethodGet, base, nil)
 		lazy := request(t, h, http.MethodGet, base+"?revision_details=lazy", nil)
 		var original struct {
-			Revision    model.Revision
-			Revisions   []model.Revision
-			RequestText string `json:"request_text"`
+			Revision    model.Revision   `json:"revision"`
+			Revisions   []model.Revision `json:"revisions"`
+			RequestText string           `json:"request_text"`
 		}
 		var light struct {
-			Revision    model.Revision
+			Revision    model.Revision          `json:"revision"`
 			Summaries   []model.RevisionSummary `json:"revision_summaries"`
 			RequestText string                  `json:"request_text"`
 		}
@@ -218,7 +219,7 @@ func TestLazyRevisionInspectionPreservesDetailsAndScope(t *testing.T) {
 		if err = json.Unmarshal(lazy.Body.Bytes(), &light); err != nil {
 			t.Fatal(err)
 		}
-		var shape map[string]json.RawMessage
+		var shape map[string]jsontext.Value
 		if err = json.Unmarshal(lazy.Body.Bytes(), &shape); err != nil {
 			t.Fatal(err)
 		}
@@ -322,7 +323,7 @@ func TestAdvancedEditCannotChangeRequestProvenance(t *testing.T) {
 	db, h := testAdmin(t)
 	e := publishFixture(t, db)
 	var changed map[string]any
-	b, _ := json.Marshal(e.Revision)
+	b, _ := json.Marshal(e.Revision, json.Deterministic(true))
 	if err := json.Unmarshal(b, &changed); err != nil {
 		t.Fatal(err)
 	}

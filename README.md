@@ -16,7 +16,7 @@ export OPENROUTER_API_KEY='your-key'
 ./bin/replay-proxy -config config.local.json
 ```
 
-Every `/v1/*` and `/api/*` request needs an access token (see [Authentication](#authentication)). Issue one and open the console login link it prints:
+Every `/v1/*`, `/api/*` and `/mcp` request needs an access token (see [Authentication](#authentication)). Issue one and open the console login link it prints:
 
 ```sh
 ./bin/replay-proxy token issue -config config.local.json
@@ -127,7 +127,7 @@ rate, completion errors, and separate upstream/replay duration and first-SSE-
 event percentiles. Record-mode requests are cache bypasses. Existing history
 from an older database remains untimed rather than being treated as zero.
 
-Matching uses a versioned SHA-256 input containing the API type (Chat Completions, Responses, or Messages) and the canonical JSON request: model, messages, temperature, tools, and every other field. The upstream provider, its URL, and its headers are not part of it. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
+Matching uses a versioned SHA-256 input containing the API type (Chat Completions, Responses, or Messages) and the canonical JSON request: model, messages, temperature, tools, and every other field. The upstream provider, its URL, and its headers are not part of it. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Two tool-related differences are ignored as well, because clients often produce them nondeterministically. First, the order of the `tools` array. Second, object key order and whitespace inside JSON carried in strings: tool-call arguments and tool results (Responses `function_call` arguments and `function_call_output` output, Chat Completions `tool_calls` arguments and `tool` messages, Messages `tool_result` content). Values in that JSON still have to match exactly, and a string that isn't a JSON object or array is compared verbatim. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
 
 Collection-specific JSON Pointer exclusions remove fields only from matching, never from the forwarded request. For example, `/metadata/run_id` ignores a volatile run identifier. Matching rules are immutable: create a new collection to change exclusions. Use the request comparison panel to inspect changing fields before adding exclusions.
 
@@ -142,6 +142,27 @@ The control panel provides collection management, request history and hit/miss o
 Edits are validated before becoming new revisions. Stream structure, completion, and text/final-output agreement are checked. Restoring activates a saved immutable revision without deleting history. Usage remains historical metadata from the original provider response; editing never estimates token counts.
 
 Export downloads a consistent SQLite snapshot of one collection with its matching rules and revisions; request history is not included. Import adds collections to the current database. Upstream credentials and runtime configuration are separate; recordings replay regardless of the providers configured where they are imported.
+
+## MCP access
+
+The proxy also serves a read-only [Model Context Protocol](https://modelcontextprotocol.io) endpoint at `/mcp` on the same listener, so an LLM client can browse collections, recordings, revisions and history with request bodies reassembled and responses decompressed. It uses the streamable HTTP transport (stateless) and the same access tokens as inference: send `Authorization: Bearer <token>` or `x-api-key`; the console cookie is not accepted.
+
+```sh
+claude mcp add --transport http replay-proxy http://127.0.0.1:8080/mcp --header "Authorization: Bearer $(replay-proxy token issue -subject mcp)"
+```
+
+| Tool | Returns |
+| --- | --- |
+| `list_collections` | Collections, exclusions, and the current mode and timing settings |
+| `list_recordings` | A collection's recordings with request and response summaries; `query` filters by route, key, model or user text |
+| `get_recording` | The exact request, a revision's response body or SSE frames, reconstructed assistant text, validation result and revision list |
+| `list_history` | Inference calls, newest first; `outcomes` filters (for example `["miss","error"]`) and `before_id` pages back |
+| `get_history_item` | One call's exact request and the response it was served or recorded |
+| `diagnose_replay` | Why a call hit, missed or failed, whether it matches a recording now or in another collection, and its JSON differences from the closest recording (of the nearest few, the one with the fewest key-changing differences) |
+| `compare_requests` | A call's (or any) request diffed against a recording's, marking differences the exclusions ignore |
+| `find_nearest_recordings`, `list_threads`, `get_thread`, `get_insights` | The console's nearest-match, thread and dashboard data |
+
+Large strings are cut to a per-call `max_bytes` allowance (default 200 000; `0` means unlimited) and listed under `truncated` with their full length. `max_value_bytes` also caps each string on its own, so one large value cannot use up the allowance: comparisons default to 2 000 bytes per value, shown as an excerpt starting just before the first difference; `get_recording` and `get_history_item` take `include_request: false` to leave the request out. Comparisons align arrays by content, so an inserted message is one difference and a reordered or moved element is reported as such. No tool changes data.
 
 ## Recording a demo
 

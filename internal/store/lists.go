@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/local/llm-replay-proxy/internal/model"
@@ -90,10 +91,12 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 	return out, rows.Err()
 }
 
-const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,provider"
+const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,provider,revision_id"
 
 func scanHistory(row interface{ Scan(...any) error }) (h model.History, body sql.NullInt64, err error) {
-	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus, &h.Provider)
+	var revision sql.NullInt64
+	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus, &h.Provider, &revision)
+	h.RevisionID = revision.Int64
 	return
 }
 
@@ -106,6 +109,19 @@ func (s *Store) History(ctx context.Context, cid int64, limit int) ([]model.Hist
 // fetch only what it has not seen. History rows never change once written.
 // A non-empty provider keeps only the calls that selected that provider.
 func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int, provider string) ([]model.History, error) {
+	return s.historyBetween(ctx, cid, afterID, 0, limit, provider, nil)
+}
+
+// HistoryBefore lists calls older than beforeID, newest first, so a reader can
+// page back through history; beforeID 0 starts from the newest call. Non-empty
+// outcomes keep only calls with one of those outcomes.
+func (s *Store) HistoryBefore(ctx context.Context, cid, beforeID int64, limit int, provider string, outcomes []string) ([]model.History, error) {
+	return s.historyBetween(ctx, cid, 0, beforeID, limit, provider, outcomes)
+}
+
+// historyBetween lists calls with afterID < id < beforeID (no upper bound when
+// beforeID is 0), newest first.
+func (s *Store) historyBetween(ctx context.Context, cid, afterID, beforeID int64, limit int, provider string, outcomes []string) ([]model.History, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -116,7 +132,15 @@ func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int,
 	if provider == "unknown" {
 		value = "" // rows without a provider, as Insights names them
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+historyCols+" FROM history WHERE collection_id=? AND id>? AND (NOT ? OR provider=?) ORDER BY id DESC LIMIT ?", cid, afterID, filtered, value, limit)
+	query := "SELECT " + historyCols + " FROM history WHERE collection_id=? AND id>? AND (?=0 OR id<?) AND (NOT ? OR provider=?)"
+	args := []any{cid, afterID, beforeID, beforeID, filtered, value}
+	if len(outcomes) > 0 {
+		query += " AND outcome IN (?" + strings.Repeat(",?", len(outcomes)-1) + ")"
+		for _, o := range outcomes {
+			args = append(args, o)
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, query+" ORDER BY id DESC LIMIT ?", append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}

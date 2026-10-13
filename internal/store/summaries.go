@@ -3,9 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"strings"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 	"github.com/local/llm-replay-proxy/internal/protocol"
 )
@@ -107,7 +108,7 @@ func (s *Store) requestSummaries(ctx context.Context, need map[int64]string) (ma
 			return nil, err
 		}
 		v := protocol.SummarizeRequest(need[id], body)
-		encoded, err := json.Marshal(v)
+		encoded, err := jsontree.Marshal(v)
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +167,7 @@ func (s *Store) responseSummaries(ctx context.Context, ids map[int64]bool) (map[
 			return nil, err
 		}
 		v := protocol.SummarizeResponse(route, streaming, rev)
-		encoded, err := json.Marshal(v)
+		encoded, err := jsontree.Marshal(v)
 		if err != nil {
 			return nil, err
 		}

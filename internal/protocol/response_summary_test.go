@@ -1,8 +1,8 @@
 package protocol
 
 import (
-	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"testing"
 
@@ -14,11 +14,11 @@ func sse(objects ...string) []model.Event {
 	for i, o := range objects {
 		data := o
 		if o != "[DONE]" {
-			var compact bytes.Buffer
-			if err := json.Compact(&compact, []byte(o)); err != nil {
+			compact := jsontext.Value(o)
+			if err := compact.Compact(); err != nil {
 				panic(fmt.Sprintf("fixture %d: %v", i, err))
 			}
-			data = compact.String()
+			data = string(compact)
 		}
 		out = append(out, model.Event{Data: "data: " + data + "\n\n", OffsetMS: int64(i)})
 	}
@@ -149,7 +149,7 @@ func TestSummarizeResponse(t *testing.T) {
 }
 
 func TestSummarizeResponseNullsAreSerialized(t *testing.T) {
-	b, err := json.Marshal(SummarizeResponse(ChatRoute, false, model.Revision{Body: `{"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"content":"x"}}]}`}))
+	b, err := json.Marshal(SummarizeResponse(ChatRoute, false, model.Revision{Body: `{"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"content":"x"}}]}`}), json.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -17,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	matching "github.com/local/llm-replay-proxy/internal/match"
 	"github.com/local/llm-replay-proxy/internal/model"
 	"github.com/local/llm-replay-proxy/internal/protocol"
@@ -42,7 +44,7 @@ func sqliteFileURL(path string) string { return (&url.URL{Scheme: "file", Path: 
 
 // schemaVersion is stored in PRAGMA user_version. A database or snapshot in
 // any other format is refused rather than migrated.
-const schemaVersion = 6
+const schemaVersion = 7
 
 const schema = `
 PRAGMA foreign_keys=ON;
@@ -172,7 +174,7 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func encode(v any) (string, error) { b, err := json.Marshal(v); return string(b), err }
+func encode(v any) (string, error) { b, err := jsontree.Marshal(v); return string(b), err }
 
 func (s *Store) Collections(ctx context.Context) ([]model.Collection, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id,name,exclusions,created_at FROM collections ORDER BY id")
@@ -350,7 +352,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if rec.CollectionID == 0 || rec.Key == "" || rec.Route == "" {
 		return model.Entry{}, errors.New("recording collection, key, and route are required")
 	}
-	if !json.Valid(rec.Request) {
+	if !rec.Request.IsValid() {
 		return model.Entry{}, errors.New("request must be valid JSON")
 	}
 	collection, err := s.Collection(ctx, rec.CollectionID)
@@ -374,7 +376,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 		rev.Events = []model.Event{}
 	}
 	if len(rev.Request) == 0 {
-		rev.Request = append(json.RawMessage(nil), rec.Request...)
+		rev.Request = append(jsontext.Value(nil), rec.Request...)
 	}
 	// Canonicalizing a multi-megabyte request is the costliest validation step;
 	// skip the second pass when the revision carries the same bytes.
@@ -455,7 +457,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	}
 	rev.MatchingInput = vinput
 	rec.ActiveRevisionID = rev.ID
-	rec.Request, rec.MatchingInput = append(json.RawMessage(nil), rev.Request...), vinput
+	rec.Request, rec.MatchingInput = append(jsontext.Value(nil), rev.Request...), vinput
 	return model.Entry{Recording: rec, Revision: rev}, nil
 }
 
@@ -463,7 +465,7 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 type derived struct {
 	route      string
 	exclusions []string
-	inputs     map[string]json.RawMessage
+	inputs     map[string]jsontext.Value
 }
 
 func (s *Store) derivation(ctx context.Context, r model.Recording) (*derived, error) {
@@ -471,10 +473,10 @@ func (s *Store) derivation(ctx context.Context, r model.Recording) (*derived, er
 	if err != nil {
 		return nil, err
 	}
-	return &derived{route: r.Route, exclusions: c.Exclusions, inputs: map[string]json.RawMessage{}}, nil
+	return &derived{route: r.Route, exclusions: c.Exclusions, inputs: map[string]jsontext.Value{}}, nil
 }
 
-func (d *derived) input(request json.RawMessage) (json.RawMessage, error) {
+func (d *derived) input(request jsontext.Value) (jsontext.Value, error) {
 	if in, ok := d.inputs[string(request)]; ok {
 		return in, nil
 	}
@@ -534,6 +536,28 @@ func (s *Store) RevisionSummaries(ctx context.Context, rid int64) ([]model.Revis
 // stored but is not needed by the revision JSON API.
 func (s *Store) Revision(ctx context.Context, rid, vid int64) (model.Revision, error) {
 	v, _, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
+	return v, err
+}
+
+// RevisionDetail is Revision with the request it was recorded for and that
+// request's matching input.
+func (s *Store) RevisionDetail(ctx context.Context, rid, vid int64) (model.Revision, error) {
+	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", rid))
+	if err != nil {
+		return model.Revision{}, err
+	}
+	v, bodyID, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
+	if err != nil {
+		return model.Revision{}, err
+	}
+	if v.Request, err = loadBody(ctx, s.db, bodyID.Int64); err != nil {
+		return model.Revision{}, err
+	}
+	d, err := s.derivation(ctx, r)
+	if err != nil {
+		return model.Revision{}, err
+	}
+	v.MatchingInput, err = d.input(v.Request)
 	return v, err
 }
 
@@ -788,8 +812,8 @@ func stateField(v any, want string) bool {
 	return false
 }
 func rawContainsState(raw string, want string) bool {
-	var o map[string]any
-	if json.Unmarshal([]byte(raw), &o) != nil {
+	o, err := jsontree.Object([]byte(raw), jsontree.Lenient...)
+	if err != nil {
 		return false
 	}
 	if stateField(o["id"], want) || stateField(o["conversation"], want) || stateField(o["container"], want) {
@@ -847,7 +871,7 @@ func validateImportedHeaders(headers map[string]string) error {
 	}
 	return nil
 }
-func requestStreaming(raw json.RawMessage) bool {
+func requestStreaming(raw jsontext.Value) bool {
 	var x struct {
 		Stream bool `json:"stream"`
 	}

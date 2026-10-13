@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"os"
 	"path/filepath"
@@ -71,7 +72,7 @@ func TestExportOmitsRequestHistory(t *testing.T) {
 	path := exportWith(t, func(s *Store, cid int64) {
 		publishOne(t, s, testRecording(cid, "kept"), testRevision("resp_kept", "recorded"))
 		for _, outcome := range []string{"miss", "upstream_error"} {
-			if err := s.AddHistory(ctx, model.History{CollectionID: cid, Route: "/v1/responses", Key: "k", Request: json.RawMessage(`{"input":"` + marker + `"}`), Outcome: outcome, Detail: marker}); err != nil {
+			if err := s.AddHistory(ctx, model.History{CollectionID: cid, Route: "/v1/responses", Key: "k", Request: jsontext.Value(`{"input":"` + marker + `"}`), Outcome: outcome, Detail: marker}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -210,7 +211,7 @@ func TestImportNormalisesNullJSONAndTrimsNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(listed[len(listed)-1])
+	b, _ := json.Marshal(listed[len(listed)-1], json.Deterministic(true))
 	if !bytes.Contains(b, []byte(`"exclusions":[]`)) {
 		t.Fatalf("collection JSON: %s", b)
 	}

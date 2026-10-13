@@ -2,7 +2,8 @@ package config
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -19,20 +20,20 @@ type KMS struct {
 	Endpoint      string `json:"endpoint"`
 	Namespace     string `json:"namespace,omitempty"`
 	ConfigKey     string `json:"config_key,omitempty"`
-	ConfigVersion uint64 `json:"config_version,omitempty"`
+	ConfigVersion uint64 `json:"config_version,omitzero"`
 	TokenEnv      string `json:"token_env,omitempty"`
 	CAFile        string `json:"ca_file,omitempty"`
 	CertFile      string `json:"cert_file,omitempty"`
 	KeyFile       string `json:"key_file,omitempty"`
-	Insecure      bool   `json:"insecure,omitempty"`
-	TimeoutMS     int64  `json:"timeout_ms,omitempty"`
+	Insecure      bool   `json:"insecure,omitzero"`
+	TimeoutMS     int64  `json:"timeout_ms,omitzero"`
 }
 
 // SecretRef can pin a credential version. Binding keys stay in the process
 // environment and are passed directly to the SDK's redacting credential type.
 type SecretRef struct {
 	Key           string `json:"key"`
-	Version       uint64 `json:"version,omitempty"`
+	Version       uint64 `json:"version,omitzero"`
 	Label         string `json:"label,omitempty"`
 	BindingKeyEnv string `json:"binding_key_env,omitempty"`
 }
@@ -148,7 +149,7 @@ func atomicMergeKey(key string) bool { return strings.HasSuffix(key, "_secret") 
 // recursively (top level, upstreams, per-route entries, headers) except secret
 // references, which the overlay replaces as a unit.
 func mergeJSON(base, overlay []byte) ([]byte, error) {
-	var a, b map[string]json.RawMessage
+	var a, b map[string]jsontext.Value
 	if err := json.Unmarshal(base, &a); err != nil || a == nil {
 		return nil, errors.New("configuration must be a JSON object")
 	}
@@ -156,7 +157,7 @@ func mergeJSON(base, overlay []byte) ([]byte, error) {
 		return nil, errors.New("configuration must be a JSON object")
 	}
 	for key, value := range b {
-		var old, new map[string]json.RawMessage
+		var old, new map[string]jsontext.Value
 		if !atomicMergeKey(key) && json.Unmarshal(a[key], &old) == nil && old != nil && json.Unmarshal(value, &new) == nil && new != nil {
 			merged, err := mergeJSON(a[key], value)
 			if err != nil {
@@ -167,5 +168,5 @@ func mergeJSON(base, overlay []byte) ([]byte, error) {
 			a[key] = value
 		}
 	}
-	return json.Marshal(a)
+	return json.Marshal(a, json.Deterministic(true))
 }

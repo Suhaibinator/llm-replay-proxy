@@ -1,12 +1,12 @@
 package protocol
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -66,15 +66,11 @@ func chars(v any) int {
 
 // count reads a JSON number as a token count; anything else is unreported.
 func count(v any) *int64 {
-	n, ok := v.(json.Number)
-	if !ok {
-		return nil
-	}
-	if i, err := n.Int64(); err == nil {
+	if i, ok := jsontree.Int64(v); ok {
 		return &i
 	}
-	f, err := n.Float64()
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+	f, ok := jsontree.Float64(v)
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) {
 		return nil
 	}
 	i := int64(f)
@@ -82,12 +78,8 @@ func count(v any) *int64 {
 }
 
 func cost(v any) *float64 {
-	n, ok := v.(json.Number)
-	if !ok {
-		return nil
-	}
-	f, err := n.Float64()
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+	f, ok := jsontree.Float64(v)
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) {
 		return nil
 	}
 	return &f
