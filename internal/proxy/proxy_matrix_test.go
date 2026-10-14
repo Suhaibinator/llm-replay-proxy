@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestUpstreamHTTPErrorsAreNeverPublishedForAnyProtocol(t *testing.T) {
@@ -235,6 +236,8 @@ func TestRecordedProviderStateAllowsExactReplayButGuardsLiveRequests(t *testing.
 	}
 }
 
+// Concurrent identical misses share one upstream call, so every caller
+// continues from the same answer that replay will serve.
 func TestConcurrentIdenticalAutoMissesPublishSafely(t *testing.T) {
 	const n = 12
 	const route = "/v1/chat/completions"
@@ -243,9 +246,6 @@ func TestConcurrentIdenticalAutoMissesPublishSafely(t *testing.T) {
 	release := make(chan struct{})
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		call := calls.Add(1)
-		if call == n {
-			close(release)
-		}
 		<-release
 		return matrixResponse(http.StatusOK, matrixChatBody(fmt.Sprintf("call-%d", call)), "application/json"), nil
 	})}
@@ -261,15 +261,24 @@ func TestConcurrentIdenticalAutoMissesPublishSafely(t *testing.T) {
 			results <- perform(h, route, requestBody)
 		}()
 	}
+	// Let every caller reach the proxy before the one upstream call returns.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
 	wg.Wait()
 	close(results)
+	var first string
 	for result := range results {
 		if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"finish_reason":"stop"`) {
 			t.Fatalf("concurrent response = %d %q", result.Code, result.Body.String())
 		}
+		if first == "" {
+			first = result.Body.String()
+		} else if result.Body.String() != first {
+			t.Fatalf("callers got different answers: %q and %q", first, result.Body.String())
+		}
 	}
-	if calls.Load() != n {
-		t.Fatalf("upstream calls = %d, want %d", calls.Load(), n)
+	if calls.Load() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls.Load())
 	}
 
 	settings, _ := db.Settings(context.Background())
@@ -278,7 +287,7 @@ func TestConcurrentIdenticalAutoMissesPublishSafely(t *testing.T) {
 		t.Fatalf("recordings = %d, err = %v", len(recordings), err)
 	}
 	revisions, err := db.Revisions(context.Background(), recordings[0].ID)
-	if err != nil || len(revisions) != n {
+	if err != nil || len(revisions) != 1 {
 		t.Fatalf("revisions = %d, err = %v", len(revisions), err)
 	}
 	setMode(t, db, "replay")
