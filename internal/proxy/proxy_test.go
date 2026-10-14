@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -392,4 +394,246 @@ func response(body, contentType string) *http.Response {
 	h.Set("Content-Type", contentType)
 	h.Set("X-Request-Id", "req-1")
 	return &http.Response{StatusCode: 200, Status: "200 OK", Header: h, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+const responsesStream = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"id\":\"m1\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}]}}\n\n"
+
+// failingBody yields its prefix and then fails, like an upstream connection
+// that drops mid-stream.
+type failingBody struct {
+	r   io.Reader
+	err error
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == io.EOF {
+		return n, b.err
+	}
+	return n, err
+}
+func (b *failingBody) Close() error { return nil }
+
+func droppedStream(prefix string) *http.Response {
+	resp := response("", "text/event-stream")
+	resp.Body = &failingBody{r: strings.NewReader(prefix), err: io.ErrUnexpectedEOF}
+	return resp
+}
+
+func lastHistory(t *testing.T, db *store.Store) model.History {
+	t.Helper()
+	items, err := db.History(context.Background(), 1, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("history = %v, %v", items, err)
+	}
+	return items[0]
+}
+
+func TestStreamDroppedBeforeFirstEventIsRetried(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return droppedStream(": OPENROUTER PROCESSING\n\n"), nil
+		}
+		return response(responsesStream, "text/event-stream"), nil
+	})}
+	clock := &recordingClock{}
+	db := openTestStore(t, "record")
+	h := New(db, Config{Client: client, Clock: clock, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
+	live := perform(h, "/v1/responses", `{"stream":true}`)
+	if live.Code != 200 || live.Body.String() != ": OPENROUTER PROCESSING\n\n"+responsesStream {
+		t.Fatalf("live response = %d %q", live.Code, live.Body.String())
+	}
+	if calls != 2 || !reflect.DeepEqual(clock.sleeps, []time.Duration{retryBackoff}) {
+		t.Fatalf("upstream calls = %d, sleeps = %v", calls, clock.sleeps)
+	}
+	item := lastHistory(t, db)
+	if item.Outcome != "recorded" || !strings.Contains(item.Detail, "retried upstream after 1 failure(s)") {
+		t.Fatalf("history = %q %q", item.Outcome, item.Detail)
+	}
+	// Only the stream that succeeded is recorded.
+	setMode(t, db, "replay")
+	if replay := perform(h, "/v1/responses", `{"stream":true}`); replay.Body.String() != responsesStream {
+		t.Fatalf("replay = %q", replay.Body.String())
+	}
+}
+
+func TestStreamDroppedAfterFirstEventAbortsTheCaller(t *testing.T) {
+	var calls atomic.Int32
+	first := strings.SplitAfter(responsesStream, "\n\n")[0]
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return droppedStream(first), nil
+	})}
+	db := openTestStore(t, "record")
+	server := httptest.NewServer(New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}}))
+	defer server.Close()
+	got, err := postStream(server.URL)
+	if err == nil {
+		t.Fatalf("truncated stream ended cleanly: %q", got)
+	}
+	if string(got) != first || calls.Load() != 1 {
+		t.Fatalf("delivered %q after %d upstream calls", got, calls.Load())
+	}
+	if item := lastHistory(t, db); item.Outcome != "error" || item.Detail != "unexpected EOF" {
+		t.Fatalf("history = %q %q", item.Outcome, item.Detail)
+	}
+}
+
+func TestStreamRetriesStopAtTheAttemptLimit(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return droppedStream(""), nil
+	})}
+	db := openTestStore(t, "record")
+	server := httptest.NewServer(New(db, Config{Client: client, Clock: &recordingClock{}, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}}))
+	defer server.Close()
+	if got, err := postStream(server.URL); err == nil {
+		t.Fatalf("failed stream ended cleanly: %q", got)
+	}
+	if calls.Load() != maxUpstreamAttempts {
+		t.Fatalf("upstream calls = %d, want %d", calls.Load(), maxUpstreamAttempts)
+	}
+	if item := lastHistory(t, db); item.Outcome != "error" || !strings.Contains(item.Detail, "retried upstream after 2 failure(s)") {
+		t.Fatalf("history = %q %q", item.Outcome, item.Detail)
+	}
+}
+
+func TestStreamRetryWithAnErrorStatusAbortsTheCaller(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return droppedStream(""), nil
+		}
+		resp := response(`{"error":{"message":"overloaded"}}`, "application/json")
+		resp.StatusCode, resp.Status = 503, "503 Service Unavailable"
+		return resp, nil
+	})}
+	db := openTestStore(t, "record")
+	server := httptest.NewServer(New(db, Config{Client: client, Clock: &recordingClock{}, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}}))
+	defer server.Close()
+	if got, err := postStream(server.URL); err == nil || len(got) != 0 {
+		t.Fatalf("caller got %q, %v", got, err)
+	}
+	if item := lastHistory(t, db); item.Outcome != "error" || !strings.Contains(item.Detail, "503 Service Unavailable") {
+		t.Fatalf("history = %q %q", item.Outcome, item.Detail)
+	}
+}
+
+// postStream sends a streaming request to a live proxy and returns what the
+// caller received. An aborted response fails either before its status line,
+// when nothing was flushed, or while reading the body.
+func postStream(base string) ([]byte, error) {
+	resp, err := http.Post(base+"/v1/responses", "application/json", strings.NewReader(`{"stream":true}`))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+func TestIdenticalMissesInFlightAreForwardedOnce(t *testing.T) {
+	var calls atomic.Int32
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-unblock
+		}
+		return response(responsesStream, "text/event-stream"), nil
+	})}
+	db := openTestStore(t, "auto")
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
+	const callers = 4
+	bodies := make([]string, callers)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); bodies[0] = perform(h, "/v1/responses", `{"stream":true}`).Body.String() }()
+	<-entered
+	for i := 1; i < callers; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); bodies[i] = perform(h, "/v1/responses", `{"stream":true}`).Body.String() }()
+	}
+	// Give the followers time to queue behind the request in flight.
+	time.Sleep(50 * time.Millisecond)
+	close(unblock)
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls.Load())
+	}
+	for i, body := range bodies {
+		if body != responsesStream {
+			t.Fatalf("caller %d got %q", i, body)
+		}
+	}
+	items, err := db.History(context.Background(), 1, callers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes := map[string]int{}
+	waited := 0
+	for _, item := range items {
+		outcomes[item.Outcome]++
+		if strings.Contains(item.Detail, "identical request in flight") {
+			waited++
+		}
+	}
+	if outcomes["recorded"] != 1 || outcomes["hit"] != callers-1 || waited != callers-1 {
+		t.Fatalf("outcomes = %v, waited = %d", outcomes, waited)
+	}
+}
+
+func TestFollowerForwardsWhenTheRequestInFlightRecordsNothing(t *testing.T) {
+	var calls atomic.Int32
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-unblock
+			resp := response(`{"error":{"message":"overloaded"}}`, "application/json")
+			resp.StatusCode, resp.Status = 503, "503 Service Unavailable"
+			return resp, nil
+		}
+		return response(responsesStream, "text/event-stream"), nil
+	})}
+	db := openTestStore(t, "auto")
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
+	var leader, follower *httptest.ResponseRecorder
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); leader = perform(h, "/v1/responses", `{"stream":true}`) }()
+	<-entered
+	go func() { defer wg.Done(); follower = perform(h, "/v1/responses", `{"stream":true}`) }()
+	time.Sleep(50 * time.Millisecond)
+	close(unblock)
+	wg.Wait()
+	if leader.Code != 503 || follower.Code != 200 || follower.Body.String() != responsesStream || calls.Load() != 2 {
+		t.Fatalf("leader %d, follower %d %q, upstream calls %d", leader.Code, follower.Code, follower.Body.String(), calls.Load())
+	}
+}
+
+func TestRecordModeForwardsIdenticalRequestsIndependently(t *testing.T) {
+	var calls atomic.Int32
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-unblock
+		}
+		return response(responsesStream, "text/event-stream"), nil
+	})}
+	db := openTestStore(t, "record")
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {"/v1/responses": {URL: "https://upstream.invalid"}}}})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); perform(h, "/v1/responses", `{"stream":true}`) }()
+	<-entered
+	perform(h, "/v1/responses", `{"stream":true}`)
+	close(unblock)
+	wg.Wait()
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls.Load())
+	}
 }
