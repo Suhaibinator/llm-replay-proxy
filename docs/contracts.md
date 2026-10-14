@@ -76,8 +76,22 @@ user-written text), `opening` (the start of the first user-written text),
 `tool_calls`, `images`, `bytes`, and `thread`, a fingerprint of the
 conversation's opening shared by its later turns. A response summary
 (`ResponseSummary` in [dashboard API](dashboard-api.md)) describes a stored
-revision. Summaries are computed when a read first needs them and saved, not
-when a request is recorded.
+revision. Summaries are computed when a request or revision is stored, outside
+the database's write lock. One stored by an older build (or by a different
+summary version) is computed by the first read that needs it and saved in the
+background.
+
+Storage runs SQLite in WAL mode with one writer connection and a pool of
+read-only connections, so lookups and dashboard reads never wait for a write.
+The proxy's writes are committed in groups: one transaction carries every
+publication and history row queued while the previous one committed. A
+publication returns only after its transaction is synced to disk; history
+rows commit without their own sync (WAL keeps the database consistent, and a
+power loss can drop only the last moments of history). Closing the store
+commits everything queued. The database belongs on local disk: on a network
+filesystem every lock and sync is a round trip, and WAL is safe there only
+while a single host opens the file; the proxy logs a warning at startup when
+the database is on NFS.
 
 `history_limit` (default 10000, 0 keeps everything) is the number of history
 rows kept per collection; older rows are deleted at startup and every 10

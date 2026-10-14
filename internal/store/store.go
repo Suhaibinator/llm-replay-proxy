@@ -8,11 +8,13 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -34,9 +36,26 @@ var ErrConflict = errors.New("store: active revision changed")
 var ErrInvalidSnapshot = errors.New("invalid snapshot")
 
 type Store struct {
-	db   *sql.DB
+	// db is the single writer connection. The proxy's writes reach it
+	// through w, which commits them in groups; administrative writes use it
+	// directly and are serialized with those by the pool's one connection.
+	db *sql.DB
+	// rdb is a pool of read-only connections. WAL lets them read while a
+	// write is in progress, so lookups and admin reads never queue behind
+	// a large write. An in-memory database has no separate pool (rdb is db).
+	rdb  *sql.DB
+	w    *writer
 	path string
+	// stopCheckpoints ends the background checkpointer, which closes
+	// checkpointed when it has stopped. Both are nil in memory.
+	stopCheckpoints context.CancelFunc
+	checkpointed    chan struct{}
+	ckpt            *sql.DB
 }
+
+// readers bounds the read pool. Reads parse and decompress in Go, so more
+// connections than CPUs add nothing.
+func readers() int { return max(4, runtime.GOMAXPROCS(0)) }
 
 var memorySequence atomic.Uint64
 
@@ -103,7 +122,11 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	dsn := sqliteFileURL(absPath) + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	base := sqliteFileURL(absPath) + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+	// synchronous=FULL is the default the writer returns to after each
+	// batch of writes that need not be durable. The writer does not
+	// checkpoint until the WAL is large; the background checkpointer does.
+	dsn := base + "&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=wal_autocheckpoint(16384)"
 	if path == ":memory:" {
 		dsn = fmt.Sprintf("file:replay-%d?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", memorySequence.Add(1))
 	}
@@ -112,7 +135,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, path: path}
+	// Connections stay open: on a network filesystem opening one costs
+	// several round trips.
+	db.SetConnMaxIdleTime(0)
+	s := &Store{db: db, rdb: db, path: path}
 	if err = s.initSchema(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -121,6 +147,30 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if path != ":memory:" {
+		if onNFS(filepath.Dir(absPath)) {
+			log.Printf("store: warning: database %s is on NFS. SQLite in WAL mode is safe there only while a single host opens it, and every lock and fsync is a network round trip; local disk is strongly recommended", absPath)
+		}
+		// query_only makes a write through the read pool an error instead
+		// of a second writer competing for the lock.
+		if s.rdb, err = sql.Open("sqlite", base+"&_pragma=query_only(1)"); err != nil {
+			db.Close()
+			return nil, err
+		}
+		s.rdb.SetMaxOpenConns(readers())
+		s.rdb.SetMaxIdleConns(readers())
+		if s.ckpt, err = sql.Open("sqlite", base); err != nil {
+			s.rdb.Close()
+			db.Close()
+			return nil, err
+		}
+		s.ckpt.SetMaxOpenConns(1)
+		var ctx context.Context
+		ctx, s.stopCheckpoints = context.WithCancel(context.Background())
+		s.checkpointed = make(chan struct{})
+		go checkpoints(ctx, s.ckpt, s.checkpointed)
+	}
+	s.w = newWriter(db)
 	return s, nil
 }
 
@@ -144,7 +194,19 @@ func (s *Store) initSchema(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close commits every write already queued, then closes the database.
+func (s *Store) Close() error {
+	s.w.close()
+	if s.stopCheckpoints != nil {
+		s.stopCheckpoints()
+		<-s.checkpointed
+		s.ckpt.Close()
+	}
+	if s.rdb != s.db {
+		s.rdb.Close()
+	}
+	return s.db.Close()
+}
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
@@ -178,7 +240,7 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 func encode(v any) (string, error) { b, err := jsontree.Marshal(v); return string(b), err }
 
 func (s *Store) Collections(ctx context.Context) ([]model.Collection, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,name,exclusions,created_at FROM collections ORDER BY id")
+	rows, err := s.rdb.QueryContext(ctx, "SELECT id,name,exclusions,created_at FROM collections ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -239,12 +301,12 @@ func scanCollection(row interface{ Scan(...any) error }) (model.Collection, erro
 	return c, err
 }
 func (s *Store) Collection(ctx context.Context, id int64) (model.Collection, error) {
-	return scanCollection(s.db.QueryRowContext(ctx, "SELECT id,name,exclusions,created_at FROM collections WHERE id=?", id))
+	return scanCollection(s.rdb.QueryRowContext(ctx, "SELECT id,name,exclusions,created_at FROM collections WHERE id=?", id))
 }
 
 func (s *Store) Settings(ctx context.Context) (model.Settings, error) {
 	var v model.Settings
-	err := s.db.QueryRowContext(ctx, "SELECT mode,active_collection_id,first_event_delay_ms,pacing,delay_multiplier,target_tokens_per_second,history_limit FROM settings WHERE singleton=1").Scan(&v.Mode, &v.ActiveCollectionID, &v.FirstEventDelayMS, &v.Pacing, &v.DelayMultiplier, &v.TargetTokensPerSecond, &v.HistoryLimit)
+	err := s.rdb.QueryRowContext(ctx, "SELECT mode,active_collection_id,first_event_delay_ms,pacing,delay_multiplier,target_tokens_per_second,history_limit FROM settings WHERE singleton=1").Scan(&v.Mode, &v.ActiveCollectionID, &v.FirstEventDelayMS, &v.Pacing, &v.DelayMultiplier, &v.TargetTokensPerSecond, &v.HistoryLimit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -341,16 +403,35 @@ func scanRevision(row interface{ Scan(...any) error }) (r model.Revision, bodyID
 // Lookup serves the replay hot path: it reads the response but never the
 // request, which can be megabytes and is not needed to replay.
 func (s *Store) Lookup(ctx context.Context, cid int64, key string) (model.Entry, error) {
-	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? AND key=?", cid, key))
+	var r model.Recording
+	v, _, err := scanRevision(activeRow(&r, s.rdb.QueryRowContext(ctx, "SELECT "+activeCols+" WHERE r.collection_id=? AND r.key=?", cid, key)))
 	if err != nil {
 		return model.Entry{}, err
 	}
-	if r.ActiveRevisionID == 0 {
-		return model.Entry{}, ErrNotFound
-	}
-	v, _, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE id=?", r.ActiveRevisionID))
-	return model.Entry{Recording: r, Revision: v}, err
+	return model.Entry{Recording: r, Revision: v}, nil
 }
+
+// activeCols selects a recording joined to its active revision, in one
+// statement and so one read transaction; a recording without an active
+// revision has no row. activeRow scans it.
+var activeCols = qualified("r.", recordingCols) + "," + qualified("v.", revisionCols) +
+	" FROM recordings r JOIN revisions v ON v.id=r.active_revision_id"
+
+// activeRow scans an activeCols row's recording into r, leaving its
+// revision for scanRevision.
+func activeRow(r *model.Recording, row interface{ Scan(...any) error }) interface{ Scan(...any) error } {
+	return scanFunc(func(dest ...any) error {
+		var stream int
+		var active sql.NullInt64
+		err := row.Scan(append([]any{&r.ID, &r.CollectionID, &r.Key, &r.Route, &stream, &active, &r.CreatedAt}, dest...)...)
+		r.Streaming, r.ActiveRevisionID = stream != 0, active.Int64
+		return err
+	})
+}
+
+type scanFunc func(...any) error
+
+func (f scanFunc) Scan(dest ...any) error { return f(dest...) }
 
 func (s *Store) Publish(ctx context.Context, rec model.Recording, rev model.Revision) (model.Entry, error) {
 	return s.publish(ctx, rec, rev, nil, now())
@@ -434,49 +515,55 @@ func (s *Store) publish(ctx context.Context, rec model.Recording, rev model.Revi
 	if err != nil {
 		return model.Entry{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	// Summaries are computed here, by the caller, so the writer only stores
+	// them and list reads never have to.
+	body, err := s.prepareBody(ctx, rec.Route, rev.Request)
 	if err != nil {
 		return model.Entry{}, err
 	}
-	defer tx.Rollback()
-	existing, err := scanRecording(tx.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? AND key=?", rec.CollectionID, rec.Key))
-	if errors.Is(err, ErrNotFound) {
-		if expectedRevisionID != nil && *expectedRevisionID != 0 {
-			return model.Entry{}, ErrConflict
-		}
-		rec.CreatedAt = at
-		res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,streaming,created_at) VALUES(?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, rec.Streaming, rec.CreatedAt)
-		if e != nil {
-			return model.Entry{}, e
-		}
-		if rec.ID, e = res.LastInsertId(); e != nil {
-			return model.Entry{}, e
-		}
-	} else if err != nil {
-		return model.Entry{}, err
-	} else {
-		if expectedRevisionID != nil && existing.ActiveRevisionID != *expectedRevisionID {
-			return model.Entry{}, ErrConflict
-		}
-		rec = existing
-	}
-	bodyID, err := internBody(ctx, tx, rev.Request)
+	response, err := jsontree.Marshal(protocol.SummarizeResponse(rec.Route, rec.Streaming, rev))
 	if err != nil {
 		return model.Entry{}, err
 	}
-	rev.RecordingID = rec.ID
-	rev.CreatedAt = at
-	res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at) VALUES(?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, bj, ej, bodyID, rev.Source, rev.CreatedAt)
+	err = s.w.write(ctx, durablePublish, true, func(ctx context.Context, tx *sql.Tx) error {
+		existing, err := scanRecording(tx.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE collection_id=? AND key=?", rec.CollectionID, rec.Key))
+		if errors.Is(err, ErrNotFound) {
+			if expectedRevisionID != nil && *expectedRevisionID != 0 {
+				return ErrConflict
+			}
+			rec.CreatedAt = at
+			res, e := tx.ExecContext(ctx, `INSERT INTO recordings(collection_id,key,route,streaming,created_at) VALUES(?,?,?,?,?)`, rec.CollectionID, rec.Key, rec.Route, rec.Streaming, rec.CreatedAt)
+			if e != nil {
+				return e
+			}
+			if rec.ID, e = res.LastInsertId(); e != nil {
+				return e
+			}
+		} else if err != nil {
+			return err
+		} else {
+			if expectedRevisionID != nil && existing.ActiveRevisionID != *expectedRevisionID {
+				return ErrConflict
+			}
+			rec = existing
+		}
+		bodyID, err := storeBody(ctx, tx, body)
+		if err != nil {
+			return err
+		}
+		rev.RecordingID = rec.ID
+		rev.CreatedAt = at
+		res, err := tx.ExecContext(ctx, `INSERT INTO revisions(recording_id,status,headers,body,events,request_body,source,created_at,response_summary,response_summary_v) VALUES(?,?,?,?,?,?,?,?,?,?)`, rev.RecordingID, rev.Status, hj, bj, ej, bodyID, rev.Source, rev.CreatedAt, string(response), responseSummaryVersion)
+		if err != nil {
+			return err
+		}
+		if rev.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE recordings SET active_revision_id=? WHERE id=?", rev.ID, rec.ID)
+		return err
+	})
 	if err != nil {
-		return model.Entry{}, err
-	}
-	if rev.ID, err = res.LastInsertId(); err != nil {
-		return model.Entry{}, err
-	}
-	if _, err = tx.ExecContext(ctx, "UPDATE recordings SET active_revision_id=? WHERE id=?", rev.ID, rec.ID); err != nil {
-		return model.Entry{}, err
-	}
-	if err = tx.Commit(); err != nil {
 		return model.Entry{}, err
 	}
 	rev.MatchingInput = vinput
@@ -513,18 +600,12 @@ func (d *derived) input(request jsontext.Value) (jsontext.Value, error) {
 }
 
 func (s *Store) Get(ctx context.Context, id int64) (model.Entry, error) {
-	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", id))
+	var r model.Recording
+	v, bodyID, err := scanRevision(activeRow(&r, s.rdb.QueryRowContext(ctx, "SELECT "+activeCols+" WHERE r.id=?", id)))
 	if err != nil {
 		return model.Entry{}, err
 	}
-	if r.ActiveRevisionID == 0 {
-		return model.Entry{}, ErrNotFound
-	}
-	v, bodyID, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE id=?", r.ActiveRevisionID))
-	if err != nil {
-		return model.Entry{}, err
-	}
-	if v.Request, err = loadBody(ctx, s.db, bodyID.Int64); err != nil {
+	if v.Request, err = loadBody(ctx, s.rdb, bodyID.Int64); err != nil {
 		return model.Entry{}, err
 	}
 	d, err := s.derivation(ctx, r)
@@ -540,7 +621,7 @@ func (s *Store) Get(ctx context.Context, id int64) (model.Entry, error) {
 
 // RevisionSummaries reads metadata only, including every historical revision.
 func (s *Store) RevisionSummaries(ctx context.Context, rid int64) ([]model.RevisionSummary, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,recording_id,status,source,created_at FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
+	rows, err := s.rdb.QueryContext(ctx, "SELECT id,recording_id,status,source,created_at FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
 	if err != nil {
 		return nil, err
 	}
@@ -559,22 +640,22 @@ func (s *Store) RevisionSummaries(ctx context.Context, rid int64) ([]model.Revis
 // Revision scopes the detail lookup to its recording; request provenance stays
 // stored but is not needed by the revision JSON API.
 func (s *Store) Revision(ctx context.Context, rid, vid int64) (model.Revision, error) {
-	v, _, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
+	v, _, err := scanRevision(s.rdb.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
 	return v, err
 }
 
 // RevisionDetail is Revision with the request it was recorded for and that
 // request's matching input.
 func (s *Store) RevisionDetail(ctx context.Context, rid, vid int64) (model.Revision, error) {
-	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", rid))
+	r, err := scanRecording(s.rdb.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", rid))
 	if err != nil {
 		return model.Revision{}, err
 	}
-	v, bodyID, err := scanRevision(s.db.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
+	v, bodyID, err := scanRevision(s.rdb.QueryRowContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? AND id=?", rid, vid))
 	if err != nil {
 		return model.Revision{}, err
 	}
-	if v.Request, err = loadBody(ctx, s.db, bodyID.Int64); err != nil {
+	if v.Request, err = loadBody(ctx, s.rdb, bodyID.Int64); err != nil {
 		return model.Revision{}, err
 	}
 	d, err := s.derivation(ctx, r)
@@ -586,14 +667,14 @@ func (s *Store) RevisionDetail(ctx context.Context, rid, vid int64) (model.Revis
 }
 
 func (s *Store) Revisions(ctx context.Context, rid int64) ([]model.Revision, error) {
-	r, err := scanRecording(s.db.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", rid))
+	r, err := scanRecording(s.rdb.QueryRowContext(ctx, "SELECT "+recordingCols+" FROM recordings WHERE id=?", rid))
 	if errors.Is(err, ErrNotFound) {
 		return []model.Revision{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
+	rows, err := s.rdb.QueryContext(ctx, "SELECT "+revisionCols+" FROM revisions WHERE recording_id=? ORDER BY id DESC", rid)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +698,7 @@ func (s *Store) Revisions(ctx context.Context, rid int64) ([]model.Revision, err
 	}
 	cache := bodyCache{}
 	for i := range out {
-		if out[i].Request, err = cache.load(ctx, s.db, bodies[i]); err != nil {
+		if out[i].Request, err = cache.load(ctx, s.rdb, bodies[i]); err != nil {
 			return nil, err
 		}
 		if out[i].MatchingInput, err = d.input(out[i].Request); err != nil {
@@ -663,23 +744,30 @@ func (s *Store) AddHistory(ctx context.Context, h model.History) error {
 	if h.CreatedAt == "" {
 		h.CreatedAt = now()
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var body sql.NullInt64
+	var body *preparedBody
 	if len(h.Request) > 0 && string(h.Request) != "null" {
-		if body.Int64, err = internBody(ctx, tx, h.Request); err != nil {
+		b, err := s.prepareBody(ctx, h.Route, h.Request)
+		if err != nil {
 			return err
 		}
-		body.Valid = true
+		body = &b
 	}
 	revision := sql.NullInt64{Int64: h.RevisionID, Valid: h.RevisionID != 0}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,revision_id,provider) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, body, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus, revision, h.Provider); err != nil {
+	// History need not survive a power cut the way a recording must, so
+	// it commits without its own fsync. Once queued it is written even if
+	// the caller stops waiting.
+	return s.w.write(ctx, false, false, func(ctx context.Context, tx *sql.Tx) error {
+		var bodyID sql.NullInt64
+		if body != nil {
+			id, err := storeBody(ctx, tx, *body)
+			if err != nil {
+				return err
+			}
+			bodyID = sql.NullInt64{Int64: id, Valid: true}
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO history(collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,revision_id,provider) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, h.CollectionID, h.Route, h.Key, bodyID, h.Outcome, h.Detail, h.RecordingID, h.CreatedAt, h.Source, h.DurationMS, h.FirstEventMS, h.CacheStatus, revision, h.Provider)
 		return err
-	}
-	return tx.Commit()
+	})
 }
 
 // Analytics aggregates the complete matching history range. Legacy rows keep
@@ -689,7 +777,7 @@ func (s *Store) Analytics(ctx context.Context, cid int64, from, to time.Time) (m
 		return model.Analytics{}, errors.New("analytics start must be before end")
 	}
 	a := model.Analytics{Series: []model.AnalyticsPoint{}, Sources: map[string]model.SourceAnalytics{}}
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM history WHERE collection_id=?", cid).Scan(&a.LifetimeTotal); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, "SELECT count(*) FROM history WHERE collection_id=?", cid).Scan(&a.LifetimeTotal); err != nil {
 		return a, err
 	}
 	// created_at is RFC3339 text, possibly with a non-UTC offset from imports,
@@ -704,7 +792,7 @@ func (s *Store) Analytics(ctx context.Context, cid int64, from, to time.Time) (m
 		query += ` AND created_at<?`
 		args = append(args, upper.Format(time.DateOnly))
 	}
-	rows, err := s.db.QueryContext(ctx, query+` ORDER BY id`, args...)
+	rows, err := s.rdb.QueryContext(ctx, query+` ORDER BY id`, args...)
 	if err != nil {
 		return model.Analytics{}, err
 	}
@@ -905,7 +993,7 @@ func (s *Store) HasProviderState(ctx context.Context, cid int64, stateID string)
 	if stateID == "" {
 		return false, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT v.body,v.events FROM recordings r JOIN revisions v ON v.recording_id=r.id WHERE r.collection_id=?`, cid)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT v.body,v.events FROM recordings r JOIN revisions v ON v.recording_id=r.id WHERE r.collection_id=?`, cid)
 	if err != nil {
 		return false, err
 	}

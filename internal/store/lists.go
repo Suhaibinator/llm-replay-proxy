@@ -23,8 +23,16 @@ var ErrActiveCollection = errors.New("store: collection is active")
 // Recordings lists a collection, newest first, with each active request
 // summarized and replay hits counted from history. No request bytes are read
 // unless a summary has not been computed yet.
-func (s *Store) Recordings(ctx context.Context, cid int64) ([]model.RecordingSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.collection_id,r.key,r.route,r.streaming,r.active_revision_id,r.created_at,
+func (s *Store) Recordings(ctx context.Context, cid int64) (out []model.RecordingSummary, err error) {
+	err = s.readTx(ctx, func(q querier) error {
+		out, err = s.recordings(ctx, q, cid)
+		return err
+	})
+	return out, err
+}
+
+func (s *Store) recordings(ctx context.Context, q querier, cid int64) ([]model.RecordingSummary, error) {
+	rows, err := q.QueryContext(ctx, `SELECT r.id,r.collection_id,r.key,r.route,r.streaming,r.active_revision_id,r.created_at,
  v.request_body,coalesce(v.created_at,''),coalesce(v.source,''),(SELECT count(*) FROM revisions x WHERE x.recording_id=r.id)
 FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
@@ -53,7 +61,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 			need[body.Int64] = out[i].Route
 		}
 	}
-	sums, err := s.requestSummaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, q, need, false)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +71,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 			revisions[out[i].ActiveRevisionID] = true
 		}
 	}
-	responses, err := s.responseSummaries(ctx, revisions)
+	responses, err := s.responseSummaries(ctx, q, revisions)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +81,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 		out[i].Response = responses[out[i].ActiveRevisionID]
 		index[out[i].ID] = i
 	}
-	rows, err = s.db.QueryContext(ctx, "SELECT recording_id,count(*),max(created_at) FROM history WHERE collection_id=? AND outcome='hit' AND recording_id<>0 GROUP BY recording_id", cid)
+	rows, err = q.QueryContext(ctx, "SELECT recording_id,count(*),max(created_at) FROM history WHERE collection_id=? AND outcome='hit' AND recording_id<>0 GROUP BY recording_id", cid)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +148,17 @@ func (s *Store) historyBetween(ctx context.Context, cid, afterID, beforeID int64
 			args = append(args, o)
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, query+" ORDER BY id DESC LIMIT ?", append(args, limit)...)
+	var out []model.History
+	err := s.readTx(ctx, func(q querier) (err error) {
+		out, err = s.historyIn(ctx, q, query+" ORDER BY id DESC LIMIT ?", append(args, limit)...)
+		return err
+	})
+	return out, err
+}
+
+// historyIn reads history rows with their requests summarized.
+func (s *Store) historyIn(ctx context.Context, q querier, query string, args ...any) ([]model.History, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +182,7 @@ func (s *Store) historyBetween(ctx context.Context, cid, afterID, beforeID int64
 			need[body.Int64] = out[i].Route
 		}
 	}
-	sums, err := s.requestSummaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, q, need, false)
 	if err != nil {
 		return nil, err
 	}
@@ -178,18 +196,24 @@ func (s *Store) historyBetween(ctx context.Context, cid, afterID, beforeID int64
 
 // HistoryItem returns one call with its exact request bytes and summary.
 func (s *Store) HistoryItem(ctx context.Context, id int64) (model.History, error) {
-	h, body, err := scanHistory(s.db.QueryRowContext(ctx, "SELECT "+historyCols+" FROM history WHERE id=?", id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return h, ErrNotFound
-	}
-	if err != nil {
-		return h, err
-	}
-	if h.Request, err = (bodyCache{}).load(ctx, s.db, body); err != nil || !body.Valid {
-		return h, err
-	}
-	sums, err := s.requestSummaries(ctx, map[int64]string{body.Int64: h.Route})
-	h.Summary = sums[body.Int64]
+	var h model.History
+	err := s.readTx(ctx, func(q querier) error {
+		var body sql.NullInt64
+		var err error
+		h, body, err = scanHistory(q.QueryRowContext(ctx, "SELECT "+historyCols+" FROM history WHERE id=?", id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if h.Request, err = (bodyCache{}).load(ctx, q, body); err != nil || !body.Valid {
+			return err
+		}
+		sums, err := s.requestSummaries(ctx, q, map[int64]string{body.Int64: h.Route}, false)
+		h.Summary = sums[body.Int64]
+		return err
+	})
 	return h, err
 }
 
