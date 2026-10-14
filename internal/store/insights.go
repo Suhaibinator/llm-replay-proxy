@@ -68,10 +68,18 @@ const (
 
 // historyRows reads history rows (from is historyFrom or threadFrom plus a
 // WHERE clause) with their summaries. Each distinct body or revision summary
-// is decoded once; any not yet computed is computed and saved afterwards, in
-// bulk.
-func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]historyRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+historyRowCols+` FROM `+from, args...)
+// is decoded once; any not yet computed is computed afterwards, in bulk, and
+// queued to be saved. It reads in one transaction.
+func (s *Store) historyRows(ctx context.Context, from string, args ...any) (out []historyRow, err error) {
+	err = s.readTx(ctx, func(q querier) error {
+		out, err = s.historyRowsIn(ctx, q, from, args...)
+		return err
+	})
+	return out, err
+}
+
+func (s *Store) historyRowsIn(ctx context.Context, q querier, from string, args ...any) ([]historyRow, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+historyRowCols+` FROM `+from, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +126,7 @@ func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]hi
 	}
 	rows.Close()
 	if len(needReq) > 0 {
-		computed, err := s.requestSummaries(ctx, needReq)
+		computed, err := s.requestSummaries(ctx, q, needReq, false)
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +135,7 @@ func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]hi
 		}
 	}
 	if len(needResp) > 0 {
-		computed, err := s.responseSummaries(ctx, needResp)
+		computed, err := s.responseSummaries(ctx, q, needResp)
 		if err != nil {
 			return nil, err
 		}
@@ -694,7 +702,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	var cid int64
 	var key, route string
 	var body sql.NullInt64
-	err := s.db.QueryRowContext(ctx, "SELECT collection_id,key,route,request_body FROM history WHERE id=?", historyID).Scan(&cid, &key, &route, &body)
+	err := s.rdb.QueryRowContext(ctx, "SELECT collection_id,key,route,request_body FROM history WHERE id=?", historyID).Scan(&cid, &key, &route, &body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -707,7 +715,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	}
 	var manifest []byte
 	var bodySize int64
-	if err = s.db.QueryRowContext(ctx, "SELECT chunks,size FROM bodies WHERE id=?", body.Int64).Scan(&manifest, &bodySize); err != nil {
+	if err = s.rdb.QueryRowContext(ctx, "SELECT chunks,size FROM bodies WHERE id=?", body.Int64).Scan(&manifest, &bodySize); err != nil {
 		return nil, err
 	}
 	chunkIDs, err := manifestIDs(manifest)
@@ -716,7 +724,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	}
 	sizes := make(map[int64]int64, len(chunkIDs))
 	err = inBatches(slices.Compact(slices.Sorted(slices.Values(chunkIDs))), func(args []any, list string) error {
-		rows, err := s.db.QueryContext(ctx, "SELECT id,size FROM chunks WHERE id IN ("+list+")", args...)
+		rows, err := s.rdb.QueryContext(ctx, "SELECT id,size FROM chunks WHERE id IN ("+list+")", args...)
 		if err != nil {
 			return err
 		}
@@ -742,7 +750,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		body, size int64
 		route      string
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size,v.created_at FROM recordings r
+	rows, err := s.rdb.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size,v.created_at FROM recordings r
  JOIN revisions v ON v.id=r.active_revision_id JOIN bodies b ON b.id=v.request_body WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
 		return nil, err
@@ -784,7 +792,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	if err = rows.Close(); err != nil {
 		return nil, err
 	}
-	sums, err := s.requestSummaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, s.rdb, need, false)
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +801,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		own = *v
 	}
 	if bodySize <= fineLimit {
-		raw, err := loadBody(ctx, s.db, body.Int64)
+		raw, err := loadBody(ctx, s.rdb, body.Int64)
 		if err != nil {
 			return nil, err
 		}
@@ -806,7 +814,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 				continue
 			}
 			loads++
-			other, err := loadBody(ctx, s.db, c.body)
+			other, err := loadBody(ctx, s.rdb, c.body)
 			if err != nil {
 				return nil, err
 			}

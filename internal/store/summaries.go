@@ -11,10 +11,13 @@ import (
 	"github.com/local/llm-replay-proxy/internal/protocol"
 )
 
-// Summaries are derived data: computed the first time a read needs them and
-// saved next to what they describe, never on the proxy's write path. Each
-// carries the version of the code that made it, so a build that summarizes
-// differently recomputes older ones.
+// Summaries are derived data saved next to what they describe. A body or
+// revision is summarized by the caller storing it, before the writer is
+// involved. Rows stored by older builds, or summarized by a different
+// summaryVersion, are summarized by the first read that needs them; the
+// read uses its result at once and leaves saving it to the writer, so a read
+// never waits for a write. Each summary carries the version of the code that
+// made it, so a build that summarizes differently recomputes older ones.
 const (
 	// summaryVersion changes whenever protocol.SummarizeRequest does.
 	summaryVersion = 2
@@ -67,11 +70,35 @@ func decodeResponseSummary(version sql.NullInt64, raw []byte) *model.ResponseSum
 	return &v
 }
 
+// encodedSummary is a request summary as the bodies table stores it, with
+// the thread column used to find a thread's rows.
+type encodedSummary struct {
+	json   string
+	thread sql.NullString
+}
+
+func encodeSummary(v model.RequestSummary) (encodedSummary, error) {
+	b, err := jsontree.Marshal(v)
+	return encodedSummary{json: string(b), thread: sql.NullString{String: v.Thread, Valid: v.Thread != ""}}, err
+}
+
+// saveSummaries returns a write saving computed request summaries.
+func saveSummaries(computed map[int64]encodedSummary) func(context.Context, *sql.Tx) error {
+	return func(ctx context.Context, tx *sql.Tx) error {
+		for id, v := range computed {
+			if _, err := tx.ExecContext(ctx, "UPDATE bodies SET summary=?,summary_v=?,thread=? WHERE id=?", v.json, summaryVersion, v.thread, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 // requestSummaries returns the summary of each body in need (body id to the
-// route it was sent to). Missing or outdated summaries are computed and
-// saved with the body, along with the thread column used to find a thread's
-// rows. Ids that name no body are left out.
-func (s *Store) requestSummaries(ctx context.Context, need map[int64]string) (map[int64]*model.RequestSummary, error) {
+// route it was sent to), reading through q. Missing or outdated summaries
+// are computed and queued to be saved, unless save is set, in which case
+// they are saved before it returns. Ids that name no body are left out.
+func (s *Store) requestSummaries(ctx context.Context, q querier, need map[int64]string, save bool) (map[int64]*model.RequestSummary, error) {
 	out := make(map[int64]*model.RequestSummary, len(need))
 	ids := make([]int64, 0, len(need))
 	for id := range need {
@@ -79,7 +106,7 @@ func (s *Store) requestSummaries(ctx context.Context, need map[int64]string) (ma
 	}
 	var stale []int64
 	err := inBatches(ids, func(args []any, list string) error {
-		rows, err := s.db.QueryContext(ctx, "SELECT id,summary_v,summary FROM bodies WHERE id IN ("+list+")", args...)
+		rows, err := q.QueryContext(ctx, "SELECT id,summary_v,summary FROM bodies WHERE id IN ("+list+")", args...)
 		if err != nil {
 			return err
 		}
@@ -99,32 +126,33 @@ func (s *Store) requestSummaries(ctx context.Context, need map[int64]string) (ma
 		}
 		return rows.Err()
 	})
-	if err != nil {
-		return nil, err
+	if err != nil || len(stale) == 0 {
+		return out, err
 	}
+	computed := make(map[int64]encodedSummary, len(stale))
 	for _, id := range stale {
-		body, err := loadBody(ctx, s.db, id)
+		body, err := loadBody(ctx, q, id)
 		if err != nil {
 			return nil, err
 		}
 		v := protocol.SummarizeRequest(need[id], body)
-		encoded, err := jsontree.Marshal(v)
-		if err != nil {
-			return nil, err
-		}
-		thread := sql.NullString{String: v.Thread, Valid: v.Thread != ""}
-		if _, err = s.db.ExecContext(ctx, "UPDATE bodies SET summary=?,summary_v=?,thread=? WHERE id=?", string(encoded), summaryVersion, thread, id); err != nil {
+		if computed[id], err = encodeSummary(v); err != nil {
 			return nil, err
 		}
 		out[id] = &v
 	}
+	if save {
+		return out, s.w.write(ctx, false, false, saveSummaries(computed))
+	}
+	s.w.writeLater(saveSummaries(computed))
 	return out, nil
 }
 
-// responseSummaries returns the summary of each revision in ids, computing
-// and saving the ones missing or outdated. Ids that name no revision (one
-// deleted with its recording) are left out.
-func (s *Store) responseSummaries(ctx context.Context, ids map[int64]bool) (map[int64]*model.ResponseSummary, error) {
+// responseSummaries returns the summary of each revision in ids, reading
+// through q and computing the ones missing or outdated, which are queued to
+// be saved. Ids that name no revision (one deleted with its recording) are
+// left out.
+func (s *Store) responseSummaries(ctx context.Context, q querier, ids map[int64]bool) (map[int64]*model.ResponseSummary, error) {
 	out := make(map[int64]*model.ResponseSummary, len(ids))
 	list := make([]int64, 0, len(ids))
 	for id := range ids {
@@ -132,7 +160,7 @@ func (s *Store) responseSummaries(ctx context.Context, ids map[int64]bool) (map[
 	}
 	var stale []int64
 	err := inBatches(list, func(args []any, in string) error {
-		rows, err := s.db.QueryContext(ctx, "SELECT id,response_summary_v,response_summary FROM revisions WHERE id IN ("+in+")", args...)
+		rows, err := q.QueryContext(ctx, "SELECT id,response_summary_v,response_summary FROM revisions WHERE id IN ("+in+")", args...)
 		if err != nil {
 			return err
 		}
@@ -152,13 +180,14 @@ func (s *Store) responseSummaries(ctx context.Context, ids map[int64]bool) (map[
 		}
 		return rows.Err()
 	})
-	if err != nil {
-		return nil, err
+	if err != nil || len(stale) == 0 {
+		return out, err
 	}
+	computed := make(map[int64]string, len(stale))
 	for _, id := range stale {
 		var route string
 		var streaming bool
-		row := s.db.QueryRowContext(ctx, "SELECT "+qualified("v.", revisionCols)+",r.route,r.streaming FROM revisions v JOIN recordings r ON r.id=v.recording_id WHERE v.id=?", id)
+		row := q.QueryRowContext(ctx, "SELECT "+qualified("v.", revisionCols)+",r.route,r.streaming FROM revisions v JOIN recordings r ON r.id=v.recording_id WHERE v.id=?", id)
 		rev, _, err := scanRevision(scanExtra{row, []any{&route, &streaming}})
 		if err == ErrNotFound {
 			continue
@@ -171,11 +200,17 @@ func (s *Store) responseSummaries(ctx context.Context, ids map[int64]bool) (map[
 		if err != nil {
 			return nil, err
 		}
-		if _, err = s.db.ExecContext(ctx, "UPDATE revisions SET response_summary=?,response_summary_v=? WHERE id=?", string(encoded), responseSummaryVersion, id); err != nil {
-			return nil, err
-		}
+		computed[id] = string(encoded)
 		out[id] = &v
 	}
+	s.w.writeLater(func(ctx context.Context, tx *sql.Tx) error {
+		for id, v := range computed {
+			if _, err := tx.ExecContext(ctx, "UPDATE revisions SET response_summary=?,response_summary_v=? WHERE id=?", v, responseSummaryVersion, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	return out, nil
 }
 
@@ -194,9 +229,10 @@ type scanExtra struct {
 func (s scanExtra) Scan(dest ...any) error { return s.row.Scan(append(dest, s.extra...)...) }
 
 // ensureThreads summarizes every body a collection's history references that
-// has no current summary, so the bodies.thread column can be queried.
+// has no current summary, and saves those summaries before returning, so the
+// bodies.thread column can be queried.
 func (s *Store) ensureThreads(ctx context.Context, cid int64) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT h.request_body,h.route FROM history h JOIN bodies b ON b.id=h.request_body
+	rows, err := s.rdb.QueryContext(ctx, `SELECT DISTINCT h.request_body,h.route FROM history h JOIN bodies b ON b.id=h.request_body
 WHERE h.collection_id=? AND b.summary_v<>?`, cid, summaryVersion)
 	if err != nil {
 		return err
@@ -217,6 +253,17 @@ WHERE h.collection_id=? AND b.summary_v<>?`, cid, summaryVersion)
 	if len(need) == 0 {
 		return nil
 	}
-	_, err = s.requestSummaries(ctx, need)
+	_, err = s.requestSummaries(ctx, s.rdb, need, true)
 	return err
+}
+
+// readTx runs fn in one read transaction on the read pool, so a read that
+// takes several statements sees one snapshot and takes its locks once.
+func (s *Store) readTx(ctx context.Context, fn func(q querier) error) error {
+	tx, err := s.rdb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return fn(tx)
 }

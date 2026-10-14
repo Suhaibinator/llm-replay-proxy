@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,9 +50,134 @@ func TestRecordingsListSummarizesAndCountsHits(t *testing.T) {
 	if list[1].Hits != 3 || list[1].LastHitAt != "2026-01-01T00:00:02Z" || list[1].Request != nil {
 		t.Fatalf("replayed recording: %+v", list[1])
 	}
+	// Bodies are summarized when stored, the history-only one included.
 	var stored int
-	if err = s.db.QueryRow("SELECT count(*) FROM bodies WHERE summary IS NOT NULL").Scan(&stored); err != nil || stored != 2 {
-		t.Fatalf("summaries saved for %d bodies (%v), want the 2 listed", stored, err)
+	if err = s.db.QueryRow("SELECT count(*) FROM bodies WHERE summary IS NOT NULL AND summary_v=?", summaryVersion).Scan(&stored); err != nil || stored != 3 {
+		t.Fatalf("summaries saved for %d bodies (%v), want all 3", stored, err)
+	}
+}
+
+// A body stored without a current summary (by an older build, or before a
+// summaryVersion change) is summarized by the read that needs it, which does
+// not wait for the summary to be saved; the writer saves it afterwards.
+func TestStaleSummaryIsComputedOnReadAndSavedInBackground(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addHistory(t, s, model.History{CollectionID: 1, Key: "k", Request: []byte(`{"input":"legacy"}`), Outcome: "miss"})
+	if _, err = s.db.Exec("UPDATE bodies SET summary=NULL,summary_v=0,thread=NULL"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.History(ctx, 1, 10)
+	if err != nil || len(list) != 1 || list[0].Summary == nil || list[0].Summary.Preview != "legacy" {
+		t.Fatalf("history %+v %v", list, err)
+	}
+	// Close commits every queued write, the background summary included.
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version int
+	if err = s.db.QueryRow("SELECT summary_v FROM bodies").Scan(&version); err != nil || version != summaryVersion {
+		t.Fatalf("saved summary version %d %v", version, err)
+	}
+}
+
+func TestReadPoolRejectsWrites(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.rdb.Exec("UPDATE settings SET mode='record'"); err == nil {
+		t.Fatal("the read pool accepted a write")
+	}
+}
+
+// Concurrent publications and history rows are committed in groups; every
+// caller sees its own write once its call returns, and none is lost.
+func TestConcurrentWritesAreAllCommittedAndVisible(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 200)
+	for i := range 100 {
+		wg.Go(func() {
+			rec := testRecording(1, fmt.Sprint("key-", i))
+			e, err := s.Publish(ctx, rec, testRevision(fmt.Sprint("resp_", i), "recorded"))
+			if err != nil {
+				errs <- err
+				return
+			}
+			if got, err := s.Lookup(ctx, 1, rec.Key); err != nil || got.Revision.ID != e.Revision.ID {
+				errs <- fmt.Errorf("lookup after publish: %v %v", got.Revision.ID, err)
+			}
+			errs <- s.AddHistory(ctx, model.History{CollectionID: 1, Route: "/v1/responses", Key: rec.Key, Request: rec.Request, Outcome: "recorded", RecordingID: e.Recording.ID})
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var recordings, history int
+	if err := s.db.QueryRow("SELECT (SELECT count(*) FROM recordings),(SELECT count(*) FROM history)").Scan(&recordings, &history); err != nil || recordings != 100 || history != 100 {
+		t.Fatalf("recordings %d history %d %v", recordings, history, err)
+	}
+}
+
+// A failing write in a group is rolled back alone; the others commit.
+func TestGroupCommitIsolatesFailingWrite(t *testing.T) {
+	s := openTest(t)
+	insert := func(name string) func(context.Context, *sql.Tx) error {
+		return func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, "INSERT INTO collections(name,exclusions,created_at) VALUES(?,'[]','2026-01-01T00:00:00Z')", name)
+			return err
+		}
+	}
+	failing := func(ctx context.Context, tx *sql.Tx) error {
+		if err := insert("partial")(ctx, tx); err != nil {
+			return err
+		}
+		return insert("Default")(ctx, tx) // duplicate name
+	}
+	ops := []*writeOp{
+		{fn: insert("a"), durable: true, done: make(chan error, 1)},
+		{fn: failing, done: make(chan error, 1)},
+		{fn: insert("b"), done: make(chan error, 1)},
+	}
+	s.w.commit(ops)
+	if err := <-ops[0].done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-ops[1].done; err == nil {
+		t.Fatal("duplicate collection name accepted")
+	}
+	if err := <-ops[2].done; err != nil {
+		t.Fatal(err)
+	}
+	var names string
+	if err := s.db.QueryRow("SELECT group_concat(name,',') FROM (SELECT name FROM collections ORDER BY id)").Scan(&names); err != nil || names != "Default,a,b" {
+		t.Fatalf("collections %q %v", names, err)
+	}
+	var synchronous int
+	if err := s.db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil || synchronous != 2 {
+		t.Fatalf("writer left at synchronous=%d %v, want FULL", synchronous, err)
+	}
+}
+
+func TestWritesAfterCloseFail(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if err = s.AddHistory(context.Background(), model.History{CollectionID: 1, Outcome: "miss"}); !errors.Is(err, errClosed) {
+		t.Fatalf("write after close: %v", err)
 	}
 }
 

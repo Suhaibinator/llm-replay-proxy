@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/local/llm-replay-proxy/internal/protocol"
 )
 
 // Request bodies are content-addressed. Each distinct body is stored once, as
@@ -95,18 +96,57 @@ func mustDecoder(limit uint64) *zstd.Decoder {
 	return d
 }
 
+// querier is a connection pool, connection or transaction.
 type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// preparedBody is a request body ready to store: hashed, and summarized
+// when the store does not yet hold a current summary of it.
+type preparedBody struct {
+	raw     []byte
+	hash    [sha256.Size]byte
+	summary *encodedSummary
+}
+
+// prepareBody does the CPU work of storing raw before the writer is
+// involved: hashing it and, unless the store already holds a current
+// summary of it, summarizing it for route.
+func (s *Store) prepareBody(ctx context.Context, route string, raw []byte) (preparedBody, error) {
+	b := preparedBody{raw: raw, hash: sha256.Sum256(raw)}
+	var version int64
+	err := s.rdb.QueryRowContext(ctx, "SELECT summary_v FROM bodies WHERE hash=?", b.hash[:]).Scan(&version)
+	if err == nil && version == summaryVersion {
+		return b, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return b, err
+	}
+	sum, err := encodeSummary(protocol.SummarizeRequest(route, raw))
+	b.summary = &sum
+	return b, err
+}
+
 // internBody stores raw (if it is not already stored) and returns its body id.
-// A body seen before costs one hash and one indexed lookup; a new one stores
-// only the chunks no other body already holds.
 func internBody(ctx context.Context, tx *sql.Tx, raw []byte) (int64, error) {
-	sum := sha256.Sum256(raw)
-	var id int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM bodies WHERE hash=?", sum[:]).Scan(&id)
+	return storeBody(ctx, tx, preparedBody{raw: raw, hash: sha256.Sum256(raw)})
+}
+
+// storeBody stores b (if it is not already stored) and returns its body id.
+// A body seen before costs one indexed lookup; a new one stores only the
+// chunks no other body already holds. b's summary, if any, is saved with a
+// new body or replaces an outdated one.
+func storeBody(ctx context.Context, tx *sql.Tx, b preparedBody) (int64, error) {
+	raw, sum := b.raw, b.hash
+	var id, version int64
+	err := tx.QueryRowContext(ctx, "SELECT id,summary_v FROM bodies WHERE hash=?", sum[:]).Scan(&id, &version)
 	if err == nil {
+		if b.summary != nil && version != summaryVersion {
+			if _, err = tx.ExecContext(ctx, "UPDATE bodies SET summary=?,summary_v=?,thread=? WHERE id=?", b.summary.json, summaryVersion, b.summary.thread, id); err != nil {
+				return 0, err
+			}
+		}
 		return id, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -148,7 +188,12 @@ func internBody(ctx context.Context, tx *sql.Tx, raw []byte) (int64, error) {
 		}
 		manifest = binary.AppendUvarint(manifest, uint64(cid))
 	}
-	res, err := tx.ExecContext(ctx, "INSERT INTO bodies(hash,size,chunks) VALUES(?,?,?)", sum[:], len(raw), manifest)
+	var summary, thread sql.NullString
+	version = 0
+	if b.summary != nil {
+		summary, thread, version = sql.NullString{String: b.summary.json, Valid: true}, b.summary.thread, summaryVersion
+	}
+	res, err := tx.ExecContext(ctx, "INSERT INTO bodies(hash,size,chunks,summary,summary_v,thread) VALUES(?,?,?,?,?,?)", sum[:], len(raw), manifest, summary, version, thread)
 	if err != nil {
 		return 0, err
 	}
@@ -170,24 +215,53 @@ func loadBody(ctx context.Context, q querier, id int64) (jsontext.Value, error) 
 	if size < 0 || size > maxBodyBytes {
 		return nil, fmt.Errorf("%w: body %d has size %d", errCorruptBody, id, size)
 	}
+	ids, err := manifestIDs(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("%w: body %d has an unreadable chunk list", errCorruptBody, id)
+	}
+	// Fetch the chunks in a few statements rather than one per chunk: each
+	// statement outside a transaction is a read transaction of its own, with
+	// its own round of locks.
+	type chunk struct {
+		codec int
+		size  int64
+		data  []byte
+	}
+	chunks := make(map[int64]*chunk, len(ids))
+	unique := make([]int64, 0, len(ids))
+	for _, cid := range ids {
+		if _, seen := chunks[cid]; !seen {
+			chunks[cid] = nil
+			unique = append(unique, cid)
+		}
+	}
+	err = inBatches(unique, func(args []any, list string) error {
+		rows, err := q.QueryContext(ctx, "SELECT id,codec,size,data FROM chunks WHERE id IN ("+list+")", args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid int64
+			c := &chunk{}
+			if err = rows.Scan(&cid, &c.codec, &c.size, &c.data); err != nil {
+				return err
+			}
+			chunks[cid] = c
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
 	out := make([]byte, 0, size)
 	var scratch []byte
-	for len(manifest) > 0 {
-		cid, n := binary.Uvarint(manifest)
-		if n <= 0 {
-			return nil, fmt.Errorf("%w: body %d has an unreadable chunk list", errCorruptBody, id)
-		}
-		manifest = manifest[n:]
-		var codec int
-		var chunkSize int64
-		var data []byte
-		err = q.QueryRowContext(ctx, "SELECT codec,size,data FROM chunks WHERE id=?", int64(cid)).Scan(&codec, &chunkSize, &data)
-		if errors.Is(err, sql.ErrNoRows) {
+	for _, cid := range ids {
+		c := chunks[cid]
+		if c == nil {
 			return nil, fmt.Errorf("%w: body %d references missing chunk %d", errCorruptBody, id, cid)
 		}
-		if err != nil {
-			return nil, err
-		}
+		codec, chunkSize, data := c.codec, c.size, c.data
 		if chunkSize <= 0 || chunkSize > chunkMax || int64(len(out))+chunkSize > size {
 			return nil, fmt.Errorf("%w: chunk %d has size %d", errCorruptBody, cid, chunkSize)
 		}
