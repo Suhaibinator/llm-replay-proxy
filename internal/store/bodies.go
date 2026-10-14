@@ -80,8 +80,14 @@ var (
 	chunkDecoder = mustDecoder(chunkMax)
 )
 
+// mustEncoder uses SpeedBetterCompression because the faster levels store
+// base64 uncompressed: it has no repeats to find, and only entropy coding
+// recovers its 6 bits per byte. Base64 is most of what a request stores
+// (inline images, files, audio, encrypted reasoning), and this level packs it
+// to about three quarters, as storing the decoded bytes would. Text costs the
+// same as at SpeedFastest, and only chunks not already stored are encoded.
 func mustEncoder(opts ...zstd.EOption) *zstd.Encoder {
-	e, err := zstd.NewWriter(nil, append([]zstd.EOption{zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1)}, opts...)...)
+	e, err := zstd.NewWriter(nil, append([]zstd.EOption{zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(1)}, opts...)...)
 	if err != nil {
 		panic(err)
 	}
@@ -172,8 +178,7 @@ func storeBody(ctx context.Context, tx *sql.Tx, b preparedBody) (int64, error) {
 		err = find.QueryRowContext(ctx, chunkSum[:]).Scan(&cid)
 		if errors.Is(err, sql.ErrNoRows) {
 			codec, data := codecRaw, chunk
-			// Keep compression only when it pays for the decode on read;
-			// base64 media and encrypted reasoning barely shrink.
+			// Keep compression only when it pays for the decode on read.
 			if packed := chunkEncoder.EncodeAll(chunk, nil); len(packed) < len(chunk)-len(chunk)/8 {
 				codec, data = codecZstd, packed
 			}
