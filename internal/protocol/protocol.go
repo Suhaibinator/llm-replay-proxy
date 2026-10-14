@@ -3,7 +3,6 @@
 package protocol
 
 import (
-	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"strings"
@@ -349,9 +348,8 @@ func inspectChat(stream bool, rev model.Revision, classify bool) (string, string
 						continue
 					}
 					fn, _ := asMap(call["function"])
-					args, ok := asString(fn["arguments"])
-					if !ok || validArguments(args) != nil {
-						return "", "", fmt.Errorf("chat choice %d has malformed tool arguments", i)
+					if _, ok := asString(fn["arguments"]); !ok {
+						return "", "", fmt.Errorf("chat choice %d has non-string tool arguments", i)
 					}
 				}
 			}
@@ -503,9 +501,8 @@ func responseOutputText(response map[string]any, classify bool) (string, string,
 		}
 		if item["type"] != "message" {
 			if item["type"] == "function_call" {
-				args, ok := asString(item["arguments"])
-				if !ok || !jsontext.Value(args).IsValid(jsontree.Lenient...) {
-					return "", "", errors.New("response function call has malformed arguments")
+				if _, ok := asString(item["arguments"]); !ok {
+					return "", "", errors.New("response function call arguments are not a string")
 				}
 			}
 			if classify {

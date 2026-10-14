@@ -337,9 +337,6 @@ func responsesStructure(objects []map[string]any) error {
 				if !ok {
 					return fmt.Errorf("function arguments must be a string")
 				}
-				if err := validArguments(args); err != nil {
-					return err
-				}
 				if it.hasArguments && args != it.arguments.String() {
 					return fmt.Errorf("function arguments done disagrees with deltas")
 				}
@@ -704,13 +701,6 @@ func messagesStructure(objects []map[string]any) error {
 			if block == nil || !block.open {
 				return fmt.Errorf("stop targets an unopened block")
 			}
-			// Parameterless tools stream only an empty partial_json; the
-			// object input from content_block_start then stands.
-			if block.hasArguments && block.arguments.Len() > 0 {
-				if err := validArguments(block.arguments.String()); err != nil {
-					return err
-				}
-			}
 			block.open = false
 		case "message_delta":
 			if !started {
@@ -887,23 +877,19 @@ func bodyStructure(route, body string) error {
 	return nil
 }
 
-// Completed function arguments must form one JSON object. This is a structural
-// check only: tool-specific application schemas remain the application's job.
-func validArguments(arguments string) error {
-	if _, err := bodyObject(arguments); err != nil {
-		return fmt.Errorf("tool arguments must be a complete JSON object: %w", err)
-	}
-	return nil
-}
+// Function arguments must be a string, but need not be valid JSON: they are
+// model output, recorded and replayed as received. A model can emit arguments
+// that do not parse (for example when it stops at its output token limit
+// mid-call); judging them is the application's job, and replaying them lets
+// the application's handling be reproduced.
 func functionArguments(function map[string]any) error {
 	if _, err := requiredString(function, "name"); err != nil {
 		return err
 	}
-	arguments, ok := function["arguments"].(string)
-	if !ok {
+	if _, ok := function["arguments"].(string); !ok {
 		return fmt.Errorf("function arguments must be a string")
 	}
-	return validArguments(arguments)
+	return nil
 }
 func responseFunction(item map[string]any) error {
 	if _, err := requiredString(item, "call_id"); err != nil {
