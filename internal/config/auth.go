@@ -18,7 +18,7 @@ const SigningKeyEnv = "REPLAY_JWT_KEY"
 // Auth configures client authentication. Tokens are always required unless
 // Disabled is set, which is accepted only for a loopback listen address.
 type Auth struct {
-	Disabled bool `json:"disabled,omitempty"`
+	Disabled bool `json:"disabled,omitzero"`
 	// SigningKeyFile names a file containing a base64 HMAC key (>= 32 bytes).
 	SigningKeyFile string `json:"signing_key_file,omitempty"`
 	// SigningKeySecret reads the base64 key from a KMS secret.

@@ -4,7 +4,8 @@ package config
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -69,12 +70,11 @@ func decodeConfig(raw []byte, c *Config) error {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return errors.New("configuration must be a JSON object")
 	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if err := d.Decode(c); err != nil {
+	d := jsontext.NewDecoder(bytes.NewReader(raw))
+	if err := json.UnmarshalDecode(d, c, json.RejectUnknownMembers(true)); err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	if err := d.Decode(new(any)); err != io.EOF {
+	if _, err := d.ReadToken(); err != io.EOF {
 		return errors.New("configuration must contain exactly one JSON object")
 	}
 	return nil

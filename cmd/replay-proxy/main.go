@@ -26,6 +26,7 @@ import (
 	"github.com/local/llm-replay-proxy/internal/admin"
 	"github.com/local/llm-replay-proxy/internal/auth"
 	"github.com/local/llm-replay-proxy/internal/config"
+	"github.com/local/llm-replay-proxy/internal/mcpserver"
 	"github.com/local/llm-replay-proxy/internal/proxy"
 	"github.com/local/llm-replay-proxy/internal/store"
 	"github.com/local/llm-replay-proxy/web"
@@ -171,6 +172,7 @@ func newHandler(db *store.Store, c config.Config, authority *auth.Authority) htt
 		mux.Handle(route, inference)
 	}
 	mux.Handle("/api/", admin.New(db))
+	mux.Handle("/mcp", mcpserver.New(db))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))

@@ -7,11 +7,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/fnv"
+	"math"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/local/llm-replay-proxy/internal/model"
+	"github.com/local/llm-replay-proxy/internal/protocol"
 )
 
 // historyRow is one history row with the summaries the dashboard reads: its
@@ -66,10 +68,18 @@ const (
 
 // historyRows reads history rows (from is historyFrom or threadFrom plus a
 // WHERE clause) with their summaries. Each distinct body or revision summary
-// is decoded once; any not yet computed is computed and saved afterwards, in
-// bulk.
-func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]historyRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+historyRowCols+` FROM `+from, args...)
+// is decoded once; any not yet computed is computed afterwards, in bulk, and
+// queued to be saved. It reads in one transaction.
+func (s *Store) historyRows(ctx context.Context, from string, args ...any) (out []historyRow, err error) {
+	err = s.readTx(ctx, func(q querier) error {
+		out, err = s.historyRowsIn(ctx, q, from, args...)
+		return err
+	})
+	return out, err
+}
+
+func (s *Store) historyRowsIn(ctx context.Context, q querier, from string, args ...any) ([]historyRow, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+historyRowCols+` FROM `+from, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +126,7 @@ func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]hi
 	}
 	rows.Close()
 	if len(needReq) > 0 {
-		computed, err := s.requestSummaries(ctx, needReq)
+		computed, err := s.requestSummaries(ctx, q, needReq, false)
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +135,7 @@ func (s *Store) historyRows(ctx context.Context, from string, args ...any) ([]hi
 		}
 	}
 	if len(needResp) > 0 {
-		computed, err := s.responseSummaries(ctx, needResp)
+		computed, err := s.responseSummaries(ctx, q, needResp)
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +194,7 @@ func histogram(values []int64) []model.HistogramBucket {
 	return out
 }
 
-type latencySet struct{ durations, firsts []int64 }
+type latencySet struct{ durations, firsts, speeds []int64 }
 
 func (l *latencySet) add(r *historyRow) {
 	if r.duration != nil {
@@ -193,11 +203,16 @@ func (l *latencySet) add(r *historyRow) {
 	if r.first != nil {
 		l.firsts = append(l.firsts, *r.first)
 	}
+	if r.duration != nil && r.first != nil && r.resp != nil {
+		if v := protocol.TokensPerSecond(r.resp.Usage.Output, *r.duration-*r.first); v != nil {
+			l.speeds = append(l.speeds, int64(math.Round(*v)))
+		}
+	}
 }
 
 func (l *latencySet) stats() model.LatencyStats {
 	return model.LatencyStats{
-		Duration: percentiles(l.durations), FirstEvent: percentiles(l.firsts),
+		Duration: percentiles(l.durations), FirstEvent: percentiles(l.firsts), OutputTokensPerSecond: percentiles(l.speeds),
 		Histogram: histogram(l.durations), FirstEventHistogram: histogram(l.firsts),
 	}
 }
@@ -237,21 +252,22 @@ func (h hitRate) value() *float64 {
 	return &v
 }
 
-// optionalSum is a cost total that stays null until some row reports one.
+// optionalSum is a cost total that stays null until some row reports one;
+// n counts the rows that did.
 type optionalSum struct {
-	sum      float64
-	reported bool
+	sum float64
+	n   int64
 }
 
 func (o *optionalSum) add(v *float64) {
 	if v != nil {
 		o.sum += *v
-		o.reported = true
+		o.n++
 	}
 }
 
 func (o optionalSum) value() *float64 {
-	if !o.reported {
+	if o.n == 0 {
 		return nil
 	}
 	v := o.sum
@@ -283,8 +299,9 @@ func (t *tokenSet) add(r *historyRow) {
 // threadAgg builds a ThreadSummary from a thread's rows in any order.
 type threadAgg struct {
 	model.ThreadSummary
-	first, last     time.Time
-	firstID, lastID int64
+	first, last             time.Time
+	firstID, lastID         int64
+	upstreamCost, savedCost optionalSum
 }
 
 func before(at time.Time, id int64, than time.Time, thanID int64) bool {
@@ -296,8 +313,14 @@ func before(at time.Time, id int64, than time.Time, thanID int64) bool {
 
 func (a *threadAgg) add(r *historyRow) {
 	a.Count(r.outcome)
-	if r.outcome == "recorded" && r.resp != nil {
-		a.UpstreamTokens.Add(r.resp.Usage)
+	if r.resp != nil {
+		switch r.outcome {
+		case "recorded":
+			a.UpstreamTokens.Add(r.resp.Usage)
+			a.upstreamCost.add(r.resp.Cost)
+		case "hit":
+			a.savedCost.add(r.resp.Cost)
+		}
 	}
 	if r.req != nil && r.req.Items > a.MaxItems {
 		a.MaxItems = r.req.Items
@@ -329,6 +352,9 @@ func groupThreads(rows []historyRow) []*threadAgg {
 			out = append(out, a)
 		}
 		a.add(r)
+	}
+	for _, a := range out {
+		a.UpstreamCost, a.SavedCost = a.upstreamCost.value(), a.savedCost.value()
 	}
 	slices.SortFunc(out, func(x, y *threadAgg) int {
 		if before(x.last, x.lastID, y.last, y.lastID) {
@@ -388,11 +414,13 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	}
 	type routeAgg struct {
 		model.RouteInsight
-		rate hitRate
+		rate   hitRate
+		tokens tokenSet
 	}
 	type providerAgg struct {
 		model.ProviderInsight
-		rate hitRate
+		rate   hitRate
+		tokens tokenSet
 	}
 	type recordingAgg struct {
 		hits    int64
@@ -448,6 +476,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 		}
 		route.Count(r.outcome)
 		route.rate.add(r)
+		route.tokens.add(r)
 		providerName := r.providerName()
 		provider := providers[providerName]
 		if provider == nil {
@@ -456,6 +485,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 		}
 		provider.Count(r.outcome)
 		provider.rate.add(r)
+		provider.tokens.add(r)
 		if r.outcome == "hit" && r.recordingID != 0 {
 			rec := recordings[r.recordingID]
 			if rec == nil {
@@ -475,9 +505,11 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	out.Totals.HitRate, out.Totals.Lookups, out.Totals.LookupHits = rate.value(), rate.den, rate.hits
 	out.Totals.UpstreamTokens, out.Totals.ReplayedTokens = totals.upstream, totals.replayed
 	out.Totals.UpstreamCost, out.Totals.SavedCost = totals.upstreamCost.value(), totals.savedCost.value()
+	out.Totals.UpstreamCostCalls, out.Totals.SavedCostCalls = totals.upstreamCost.n, totals.savedCost.n
 	out.Totals.Threads = int64(len(threads))
 	for _, b := range order {
 		b.UpstreamTokens, b.ReplayedTokens = b.tokens.upstream, b.tokens.replayed
+		b.UpstreamCost, b.SavedCost = b.tokens.upstreamCost.value(), b.tokens.savedCost.value()
 		b.HitRate = b.rate.value()
 		out.Series = append(out.Series, b.InsightBucket)
 	}
@@ -492,6 +524,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	})
 	for _, r := range routes {
 		r.HitRate = r.rate.value()
+		r.UpstreamCost, r.SavedCost = r.tokens.upstreamCost.value(), r.tokens.savedCost.value()
 		out.Routes = append(out.Routes, r.RouteInsight)
 	}
 	slices.SortFunc(out.Routes, func(a, b model.RouteInsight) int {
@@ -499,6 +532,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	})
 	for _, p := range providers {
 		p.HitRate = p.rate.value()
+		p.UpstreamCost, p.SavedCost = p.tokens.upstreamCost.value(), p.tokens.savedCost.value()
 		out.Providers = append(out.Providers, p.ProviderInsight)
 	}
 	slices.SortFunc(out.Providers, func(a, b model.ProviderInsight) int {
@@ -668,7 +702,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	var cid int64
 	var key, route string
 	var body sql.NullInt64
-	err := s.db.QueryRowContext(ctx, "SELECT collection_id,key,route,request_body FROM history WHERE id=?", historyID).Scan(&cid, &key, &route, &body)
+	err := s.rdb.QueryRowContext(ctx, "SELECT collection_id,key,route,request_body FROM history WHERE id=?", historyID).Scan(&cid, &key, &route, &body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -681,7 +715,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	}
 	var manifest []byte
 	var bodySize int64
-	if err = s.db.QueryRowContext(ctx, "SELECT chunks,size FROM bodies WHERE id=?", body.Int64).Scan(&manifest, &bodySize); err != nil {
+	if err = s.rdb.QueryRowContext(ctx, "SELECT chunks,size FROM bodies WHERE id=?", body.Int64).Scan(&manifest, &bodySize); err != nil {
 		return nil, err
 	}
 	chunkIDs, err := manifestIDs(manifest)
@@ -690,7 +724,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	}
 	sizes := make(map[int64]int64, len(chunkIDs))
 	err = inBatches(slices.Compact(slices.Sorted(slices.Values(chunkIDs))), func(args []any, list string) error {
-		rows, err := s.db.QueryContext(ctx, "SELECT id,size FROM chunks WHERE id IN ("+list+")", args...)
+		rows, err := s.rdb.QueryContext(ctx, "SELECT id,size FROM chunks WHERE id IN ("+list+")", args...)
 		if err != nil {
 			return err
 		}
@@ -716,7 +750,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		body, size int64
 		route      string
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size,v.created_at FROM recordings r
+	rows, err := s.rdb.QueryContext(ctx, `SELECT r.id,r.key,r.route,v.request_body,b.chunks,b.size,v.created_at FROM recordings r
  JOIN revisions v ON v.id=r.active_revision_id JOIN bodies b ON b.id=v.request_body WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
 		return nil, err
@@ -758,7 +792,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 	if err = rows.Close(); err != nil {
 		return nil, err
 	}
-	sums, err := s.requestSummaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, s.rdb, need, false)
 	if err != nil {
 		return nil, err
 	}
@@ -767,7 +801,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 		own = *v
 	}
 	if bodySize <= fineLimit {
-		raw, err := loadBody(ctx, s.db, body.Int64)
+		raw, err := loadBody(ctx, s.rdb, body.Int64)
 		if err != nil {
 			return nil, err
 		}
@@ -780,7 +814,7 @@ func (s *Store) Nearest(ctx context.Context, historyID int64) ([]model.NearestCa
 				continue
 			}
 			loads++
-			other, err := loadBody(ctx, s.db, c.body)
+			other, err := loadBody(ctx, s.rdb, c.body)
 			if err != nil {
 				return nil, err
 			}

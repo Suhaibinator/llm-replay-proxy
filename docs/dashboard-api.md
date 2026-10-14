@@ -88,7 +88,12 @@ two filters combine. 404 for an unknown collection.
 - `upstream_tokens` / `upstream_cost`: summed over `recorded` rows' revisions.
   `replayed_tokens` / `saved_cost`: summed over `hit` rows' revisions (what
   replay avoided paying for). Token fields sum only reported counts (0 when
-  none). Costs are null when no row in the set reported one.
+  none). Costs are null when no row in the set reported one. Every `series`
+  bucket and every `models`, `routes` and `providers` row carries its own
+  `upstream_cost` / `saved_cost` over its rows. `totals.upstream_cost_calls` /
+  `saved_cost_calls` count the `recorded` / `hit` rows that reported a cost,
+  the denominators of average cost per call. The console sums the series into
+  weeks (starting Monday) and months itself, in UTC like the daily buckets.
 - Model attribution: response summary `model`, else request summary `model`,
   else `"unknown"`. Provider attribution: the history row's `provider`, else
   `"unknown"`. `models`, `routes` and `providers` are sorted by `requests`,
@@ -117,6 +122,8 @@ request has no user-written text (no `thread`), are excluded. `limit` 1–500.
 `from`/`to` are optional RFC 3339 bounds (either may be omitted; no range cap)
 and restrict the rows counted. `opening` comes from the earliest row; `latest`,
 `route`, `model` (attributed as above) and `last_outcome` from the latest.
+`upstream_tokens` and `upstream_cost` sum the thread's `recorded` rows,
+`saved_cost` its `hit` rows; costs are null when no such row reported one.
 
 ## `GET /api/threads/{thread}?collection_id=N`
 

@@ -3,7 +3,8 @@ package admin
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"io"
 	"maps"
 	"net/http"
@@ -34,7 +35,7 @@ func request(t *testing.T, h http.Handler, method, target string, body any) *htt
 	t.Helper()
 	var r io.Reader
 	if body != nil {
-		b, err := json.Marshal(body)
+		b, err := json.Marshal(body, json.Deterministic(true))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,7 +60,7 @@ func TestCollectionsSettingsAndOrigin(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
 		t.Fatal(err)
 	}
-	w = request(t, h, http.MethodPut, "/api/settings", model.Settings{Mode: "auto", ActiveCollectionID: c.ID, FirstEventDelayMS: 12, DelayMultiplier: .5})
+	w = request(t, h, http.MethodPut, "/api/settings", model.Settings{Mode: "auto", ActiveCollectionID: c.ID, FirstEventDelayMS: 12, Pacing: model.PacingTokensPerSecond, DelayMultiplier: .5, TargetTokensPerSecond: 80})
 	if w.Code != 200 {
 		t.Fatalf("settings: %d %s", w.Code, w.Body.String())
 	}
@@ -68,7 +69,7 @@ func TestCollectionsSettingsAndOrigin(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &s); err != nil {
 		t.Fatal(err)
 	}
-	if s.Mode != "auto" || s.ActiveCollectionID != c.ID || s.DelayMultiplier != .5 {
+	if s.Mode != "auto" || s.ActiveCollectionID != c.ID || s.Pacing != model.PacingTokensPerSecond || s.DelayMultiplier != .5 || s.TargetTokensPerSecond != 80 {
 		t.Fatalf("settings: %+v", s)
 	}
 	req := httptest.NewRequest(http.MethodPut, "http://localhost/api/settings", bytes.NewBufferString(`{"mode":"replay","active_collection_id":1}`))
@@ -93,13 +94,23 @@ func TestCollectionsSettingsAndOrigin(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("non-loopback same-origin status %d", w.Code)
 	}
-	w = request(t, h, http.MethodPut, "/api/settings", model.Settings{Mode: "replay", ActiveCollectionID: c.ID, FirstEventDelayMS: maxDelayMS + 1, DelayMultiplier: 1})
+	w = request(t, h, http.MethodPut, "/api/settings", model.Settings{Mode: "replay", ActiveCollectionID: c.ID, FirstEventDelayMS: maxDelayMS + 1, Pacing: model.PacingMultiplier, DelayMultiplier: 1, TargetTokensPerSecond: 100})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("overflowing delay accepted: %d %s", w.Code, w.Body.String())
 	}
-	w = request(t, h, http.MethodPut, "/api/settings", model.Settings{Mode: "replay", ActiveCollectionID: c.ID, DelayMultiplier: maxDelayMultiplier + 1})
+	w = request(t, h, http.MethodPut, "/api/settings", model.Settings{Mode: "replay", ActiveCollectionID: c.ID, Pacing: model.PacingMultiplier, DelayMultiplier: store.MaxPacingValue + 1, TargetTokensPerSecond: 100})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("overflowing multiplier accepted: %d %s", w.Code, w.Body.String())
+	}
+	for _, bad := range []model.Settings{
+		{Mode: "replay", ActiveCollectionID: c.ID, DelayMultiplier: 1, TargetTokensPerSecond: 100},
+		{Mode: "replay", ActiveCollectionID: c.ID, Pacing: "fast", DelayMultiplier: 1, TargetTokensPerSecond: 100},
+		{Mode: "replay", ActiveCollectionID: c.ID, Pacing: model.PacingTokensPerSecond, DelayMultiplier: 1},
+		{Mode: "replay", ActiveCollectionID: c.ID, Pacing: model.PacingMultiplier, DelayMultiplier: 1, TargetTokensPerSecond: store.MaxPacingValue + 1},
+	} {
+		if w = request(t, h, http.MethodPut, "/api/settings", bad); w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid pacing %+v accepted: %d %s", bad, w.Code, w.Body.String())
+		}
 	}
 	w = request(t, h, http.MethodPost, "/api/collections", map[string]any{"name": "demo"})
 	if w.Code != http.StatusConflict {
@@ -151,7 +162,7 @@ func TestInspectEditRestoreCompareAndHistory(t *testing.T) {
 	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`/messages/0/content`)) || !bytes.Contains(w.Body.Bytes(), []byte(`/temperature`)) {
 		t.Fatalf("compare: %d %s", w.Code, w.Body.String())
 	}
-	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: "k", Request: json.RawMessage(`{"model":"m","messages":[{"role":"user","content":"from history"}],"large":9007199254740993}`), Outcome: "miss"}); err != nil {
+	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: "k", Request: jsontext.Value(`{"model":"m","messages":[{"role":"user","content":"from history"}],"large":9007199254740993}`), Outcome: "miss"}); err != nil {
 		t.Fatal(err)
 	}
 	w = request(t, h, http.MethodGet, "/api/history?collection_id="+itoa(e.Recording.CollectionID), nil)
@@ -200,12 +211,12 @@ func TestLazyRevisionInspectionPreservesDetailsAndScope(t *testing.T) {
 		full := request(t, h, http.MethodGet, base, nil)
 		lazy := request(t, h, http.MethodGet, base+"?revision_details=lazy", nil)
 		var original struct {
-			Revision    model.Revision
-			Revisions   []model.Revision
-			RequestText string `json:"request_text"`
+			Revision    model.Revision   `json:"revision"`
+			Revisions   []model.Revision `json:"revisions"`
+			RequestText string           `json:"request_text"`
 		}
 		var light struct {
-			Revision    model.Revision
+			Revision    model.Revision          `json:"revision"`
 			Summaries   []model.RevisionSummary `json:"revision_summaries"`
 			RequestText string                  `json:"request_text"`
 		}
@@ -218,7 +229,7 @@ func TestLazyRevisionInspectionPreservesDetailsAndScope(t *testing.T) {
 		if err = json.Unmarshal(lazy.Body.Bytes(), &light); err != nil {
 			t.Fatal(err)
 		}
-		var shape map[string]json.RawMessage
+		var shape map[string]jsontext.Value
 		if err = json.Unmarshal(lazy.Body.Bytes(), &shape); err != nil {
 			t.Fatal(err)
 		}
@@ -322,7 +333,7 @@ func TestAdvancedEditCannotChangeRequestProvenance(t *testing.T) {
 	db, h := testAdmin(t)
 	e := publishFixture(t, db)
 	var changed map[string]any
-	b, _ := json.Marshal(e.Revision)
+	b, _ := json.Marshal(e.Revision, json.Deterministic(true))
 	if err := json.Unmarshal(b, &changed); err != nil {
 		t.Fatal(err)
 	}

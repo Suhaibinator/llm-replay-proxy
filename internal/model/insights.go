@@ -61,10 +61,13 @@ type HistogramBucket struct {
 }
 
 type LatencyStats struct {
-	Duration            Percentiles       `json:"duration_ms"`
-	FirstEvent          Percentiles       `json:"first_event_ms"`
-	Histogram           []HistogramBucket `json:"histogram"`
-	FirstEventHistogram []HistogramBucket `json:"first_event_histogram"`
+	Duration   Percentiles `json:"duration_ms"`
+	FirstEvent Percentiles `json:"first_event_ms"`
+	// OutputTokensPerSecond is each streamed call's output tokens over the
+	// time from its first data frame to its end, rounded to whole tokens.
+	OutputTokensPerSecond Percentiles       `json:"output_tokens_per_second"`
+	Histogram             []HistogramBucket `json:"histogram"`
+	FirstEventHistogram   []HistogramBucket `json:"first_event_histogram"`
 }
 
 type InsightBucket struct {
@@ -73,6 +76,8 @@ type InsightBucket struct {
 	HitRate        *float64    `json:"hit_rate"`
 	UpstreamTokens TokenTotals `json:"upstream_tokens"`
 	ReplayedTokens TokenTotals `json:"replayed_tokens"`
+	UpstreamCost   *float64    `json:"upstream_cost"`
+	SavedCost      *float64    `json:"saved_cost"`
 }
 
 type ModelInsight struct {
@@ -94,14 +99,18 @@ type ProviderInsight struct {
 	OutcomeCounts
 	Provider string `json:"provider"`
 	// HitRate is defined as InsightTotals.HitRate, over this provider's rows.
-	HitRate *float64 `json:"hit_rate"`
+	HitRate      *float64 `json:"hit_rate"`
+	UpstreamCost *float64 `json:"upstream_cost"`
+	SavedCost    *float64 `json:"saved_cost"`
 }
 
 type RouteInsight struct {
 	OutcomeCounts
 	Route string `json:"route"`
 	// HitRate is defined as InsightTotals.HitRate, over this route's rows.
-	HitRate *float64 `json:"hit_rate"`
+	HitRate      *float64 `json:"hit_rate"`
+	UpstreamCost *float64 `json:"upstream_cost"`
+	SavedCost    *float64 `json:"saved_cost"`
 }
 
 type InsightTotals struct {
@@ -115,6 +124,10 @@ type InsightTotals struct {
 	ReplayedTokens TokenTotals `json:"replayed_tokens"`
 	UpstreamCost   *float64    `json:"upstream_cost"`
 	SavedCost      *float64    `json:"saved_cost"`
+	// UpstreamCostCalls and SavedCostCalls count the recorded and hit rows
+	// whose response reported a cost: the denominators of average cost.
+	UpstreamCostCalls int64 `json:"upstream_cost_calls"`
+	SavedCostCalls    int64 `json:"saved_cost_calls"`
 	// Threads counts distinct conversation threads seen in the range.
 	Threads int64 `json:"threads"`
 }
@@ -159,6 +172,10 @@ type ThreadSummary struct {
 	LastAt         string      `json:"last_at"`
 	LastOutcome    string      `json:"last_outcome"`
 	UpstreamTokens TokenTotals `json:"upstream_tokens"`
+	// UpstreamCost sums recorded rows' costs, SavedCost hit rows'; null when
+	// none reported one.
+	UpstreamCost *float64 `json:"upstream_cost"`
+	SavedCost    *float64 `json:"saved_cost"`
 }
 
 type ThreadTurn struct {

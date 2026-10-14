@@ -1,6 +1,7 @@
 "use client";
 import { ChevronRight } from "lucide-react";
 import { date, type ThreadSummary } from "@/lib/api";
+import { formatCost } from "@/lib/insights";
 import {
   compactNumber,
   describeCounts,
@@ -11,7 +12,7 @@ import { cn } from "@/lib/utils";
 import { OutcomeDot, OutcomeStrip } from "./outcome";
 
 const COLS =
-  "lg:grid-cols-[minmax(0,1fr)_minmax(9rem,13rem)_5rem_5.5rem_6rem_6.5rem_1rem]";
+  "lg:grid-cols-[minmax(0,1fr)_minmax(9rem,13rem)_5rem_5.5rem_6rem_5.5rem_6.5rem_1rem]";
 
 export function ThreadList({
   threads,
@@ -34,6 +35,7 @@ export function ThreadList({
         <span className="text-right">Requests</span>
         <span className="text-right">Grew to</span>
         <span className="text-right">Upstream</span>
+        <span className="text-right">Cost</span>
         <span className="text-right">Last active</span>
         <span />
       </div>
@@ -106,6 +108,9 @@ function ThreadRow({ t, onOpen }: { t: ThreadSummary; onOpen: () => void }) {
           <span aria-hidden="true" className="lg:hidden">
             {t.requests} requests · grew to {t.max_items} items
             {tokens ? ` · ${compactNumber(tokens)} upstream tokens` : ""}
+            {t.upstream_cost != null
+              ? ` · ${formatCost(t.upstream_cost)} spent`
+              : ""}
           </span>
           {t.misses + t.errors + t.interrupted === 0 && (
             <span aria-hidden="true" className="hidden lg:inline">
@@ -127,6 +132,20 @@ function ThreadRow({ t, onOpen }: { t: ThreadSummary; onOpen: () => void }) {
       >
         {tokens ? (
           compactNumber(tokens)
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </span>
+      <span
+        className="hidden text-right tabular-nums lg:block"
+        title={
+          t.upstream_cost != null || t.saved_cost != null
+            ? `${formatCost(t.upstream_cost)} spent upstream, ${formatCost(t.saved_cost)} saved by replay`
+            : "No cost reported"
+        }
+      >
+        {t.upstream_cost != null ? (
+          formatCost(t.upstream_cost)
         ) : (
           <span className="text-muted-foreground">—</span>
         )}

@@ -5,6 +5,7 @@ import {
   exactJSON,
   responseView,
   JSONNumber,
+  outputSpeed,
 } from "./response-viewer.ts";
 const rev = (body) => ({ status: 200, headers: {}, body, events: [] });
 const event = (value) => ({
@@ -425,4 +426,23 @@ test("Responses reasoning content parts are readable", () => {
     view.blocks.find((b) => b.kind === "reasoning").text,
     "thinking",
   );
+});
+
+test("output speed counts from the first data frame, skipping keep-alives", () => {
+  const events = [
+    { offset_ms: 900, data: ": OPENROUTER PROCESSING\n\n" },
+    { offset_ms: 2000, data: 'data: {"type":"message_start"}\n\n' },
+    { offset_ms: 3500, data: 'data: {"type":"message_stop"}\n\n' },
+  ];
+  assert.deepEqual(
+    outputSpeed(events, parseExactJSON('{"output_tokens":150}')),
+    { tokensPerSecond: 100, generationMS: 1500 },
+  );
+  assert.equal(
+    outputSpeed(events, parseExactJSON('{"completion_tokens":30}'))
+      .tokensPerSecond,
+    20,
+  );
+  assert.equal(outputSpeed(events, parseExactJSON('{"input_tokens":5}')), null);
+  assert.equal(outputSpeed(events.slice(0, 1), parseExactJSON('{"output_tokens":1}')), null);
 });

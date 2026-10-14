@@ -119,9 +119,6 @@ func validateChatTools(rev model.Revision) error {
 			if state.name == "" {
 				return fmt.Errorf("chat tool call %s is missing function name", key)
 			}
-			if err := validArguments(state.arguments.String()); err != nil {
-				return fmt.Errorf("chat tool call %s: %w", key, err)
-			}
 		}
 	}
 	seenIDs := map[string]string{}
@@ -134,9 +131,6 @@ func validateChatTools(rev model.Revision) error {
 	for key, state := range legacy {
 		if state.name == "" {
 			return fmt.Errorf("chat function call %s has no name", key)
-		}
-		if err := validArguments(state.arguments.String()); err != nil {
-			return fmt.Errorf("chat function call %s: %w", key, err)
 		}
 	}
 	return nil

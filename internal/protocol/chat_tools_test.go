@@ -23,8 +23,9 @@ func TestStreamingChatToolArguments(t *testing.T) {
 	bad := rev
 	bad.Events = append([]model.Event(nil), base...)
 	bad.Events[1] = event(1, "", `{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"Paris"}}]},"finish_reason":null}]}`)
-	if err := Validate(ChatRoute, true, bad); err == nil || !strings.Contains(err.Error(), "arguments") {
-		t.Fatalf("malformed arguments accepted: %v", err)
+	// Arguments are model output: ones that do not parse are recorded as sent.
+	if err := Validate(ChatRoute, true, bad); err != nil {
+		t.Fatalf("unparseable arguments rejected: %v", err)
 	}
 }
 

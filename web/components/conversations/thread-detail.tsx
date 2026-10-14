@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/transcript";
 import { date, type ThreadDetail } from "@/lib/api";
+import { formatCost } from "@/lib/insights";
 import {
   OUTCOME_LABEL,
   compactNumber,
@@ -51,6 +52,7 @@ export function ThreadDetailView({
   const current = timeline.turns[Math.min(active, n - 1)];
   const served = detail.hits + detail.recorded;
   const tokens = detail.upstream_tokens;
+  const priced = detail.upstream_cost != null || detail.saved_cost != null;
 
   return (
     <div className="space-y-5">
@@ -83,7 +85,12 @@ export function ThreadDetailView({
         </div>
       </div>
 
-      <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border lg:grid-cols-4">
+      <dl
+        className={cn(
+          "grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border",
+          priced ? "lg:grid-cols-5" : "lg:grid-cols-4",
+        )}
+      >
         <Stat
           label="Requests"
           value={detail.requests.toLocaleString()}
@@ -103,6 +110,13 @@ export function ThreadDetailView({
           value={compactNumber(tokenTotal(tokens))}
           note={`${compactNumber(tokens.input)} in · ${compactNumber(tokens.output)} out${tokens.reasoning ? ` · ${compactNumber(tokens.reasoning)} reasoning` : ""}`}
         />
+        {priced && (
+          <Stat
+            label="Cost"
+            value={formatCost(detail.upstream_cost)}
+            note={`spent upstream · ${formatCost(detail.saved_cost)} saved by replay`}
+          />
+        )}
         <Stat
           label="Median duration"
           value={formatMs(timeline.medianUpstream ?? timeline.medianReplay)}
@@ -115,6 +129,7 @@ export function ThreadDetailView({
                   ? "replay"
                   : "not measured"
           }
+          className={priced ? "col-span-2 lg:col-span-1" : undefined}
         />
       </dl>
 
@@ -183,13 +198,15 @@ function Stat({
   label,
   value,
   note,
+  className,
 }: {
   label: string;
   value: string;
   note: string;
+  className?: string;
 }) {
   return (
-    <div className="min-w-0 bg-card px-4 py-3">
+    <div className={cn("min-w-0 bg-card px-4 py-3", className)}>
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
         {value}

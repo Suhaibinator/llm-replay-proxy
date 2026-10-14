@@ -21,7 +21,7 @@ func TestImportRejectsCorruptionWithoutPartialCollections(t *testing.T) {
 		{"chunk list", `UPDATE bodies SET chunks=X'ff'`},
 		{"chunk size", `UPDATE chunks SET size=size+1`},
 		{"storage format", `PRAGMA user_version=1`},
-		{"previous storage format", `PRAGMA user_version=5`},
+		{"previous storage format", `PRAGMA user_version=6`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

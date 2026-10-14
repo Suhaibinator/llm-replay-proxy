@@ -24,6 +24,7 @@ import {
 import {
   JSONNumber,
   object,
+  outputSpeed,
   responseView,
   type JSONValue,
   type ResponseBlock,
@@ -159,6 +160,15 @@ export function ResponseViewer({
     (typeof view.metadata.status === "string" && view.metadata.status) ||
     "";
   const usage = usageNumbers(view.usage);
+  const speed = streaming ? outputSpeed(revision.events, view.usage) : null;
+  if (speed)
+    usage.push(
+      [
+        "Output tokens per second",
+        Math.round(speed.tokensPerSecond).toLocaleString(),
+      ],
+      ["Generation time", `${(speed.generationMS / 1000).toFixed(1)} s`],
+    );
   const lastOffset = Math.max(
     1,
     ...view.frames.map((frame) => frame.offset_ms),
@@ -246,6 +256,8 @@ export function ResponseViewer({
                 <p className="text-xs text-muted-foreground">
                   Provider-reported usage from the original recording. Edits do
                   not recalculate token counts.
+                  {speed &&
+                    " Output speed is output tokens over the time from the first data event to the last, as recorded upstream."}
                 </p>
               </section>
             )}

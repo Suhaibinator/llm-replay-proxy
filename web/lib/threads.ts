@@ -218,13 +218,14 @@ export function threadFilterFromOutcome(o?: string): ThreadOutcomeFilter {
 }
 
 export type ThreadSort =
-  "recent" | "requests" | "misses" | "longest" | "tokens";
+  "recent" | "requests" | "misses" | "longest" | "tokens" | "cost";
 export const THREAD_SORTS: { value: ThreadSort; label: string }[] = [
   { value: "recent", label: "Recent activity" },
   { value: "requests", label: "Most requests" },
   { value: "misses", label: "Most misses" },
   { value: "longest", label: "Longest" },
   { value: "tokens", label: "Most upstream tokens" },
+  { value: "cost", label: "Highest cost" },
 ];
 
 export const tokenTotal = (t: TokenTotals | null | undefined) =>
@@ -278,6 +279,9 @@ export function sortThreads(
       return by((t) => t.max_items);
     case "tokens":
       return by((t) => tokenTotal(t.upstream_tokens));
+    case "cost":
+      // Upstream spend; threads that reported none sort after every priced one.
+      return by((t) => t.upstream_cost ?? -1);
     default:
       return [...threads].sort((a, b) => b.last_at.localeCompare(a.last_at));
   }

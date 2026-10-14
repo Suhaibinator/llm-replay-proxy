@@ -116,9 +116,14 @@ func TestCompletedToolSchemas(t *testing.T) {
 		if err := bodyStructure(tc.route, tc.valid); err != nil {
 			t.Fatal(err)
 		}
+		if unparseable := strings.Replace(tc.valid, `"arguments":"{}"`, `"arguments":"{"`, 1); unparseable != tc.valid {
+			if err := bodyStructure(tc.route, unparseable); err != nil {
+				t.Fatalf("unparseable arguments rejected: %v", err)
+			}
+		}
 		for _, bad := range []string{
 			strings.Replace(tc.valid, `"name":"weather",`, "", 1),
-			strings.Replace(tc.valid, `"arguments":"{}"`, `"arguments":"{"`, 1),
+			strings.Replace(tc.valid, `"arguments":"{}"`, `"arguments":{}`, 1),
 			strings.Replace(tc.valid, `"input":{}`, `"input":null`, 1),
 			strings.Replace(tc.valid, `"call_id":"call1",`, "", 1),
 			strings.Replace(tc.valid, `"id":"call1",`, "", 1),
@@ -146,6 +151,7 @@ func TestStreamedToolArgumentConsistency(t *testing.T) {
 		{delta, strings.Replace(done, `"arguments":"{}"`, `"arguments":"{\"x\":1}"`, 1), final},
 		{delta, done, strings.Replace(final, `"arguments":"{}"`, `"arguments":"{"`, 1)},
 		{delta, done, strings.Replace(final, `"name":"weather",`, "", 1)},
+		{delta, done, strings.Replace(final, `"arguments":"{}"`, `"arguments":{}`, 1)},
 	} {
 		if err := validateStructure(ResponsesRoute, true, structureRevision(events...)); err == nil {
 			t.Fatal("accepted malformed streamed function")
@@ -154,8 +160,8 @@ func TestStreamedToolArgumentConsistency(t *testing.T) {
 	start := `{"type":"message_start","message":{"id":"m1","type":"message","content":[]}}`
 	block := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"f","input":{}}}`
 	invalid := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{"}}`
-	if err := validateStructure(MessagesRoute, true, structureRevision(start, block, invalid, `{"type":"content_block_stop","index":0}`, `{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`, `{"type":"message_stop"}`)); err == nil {
-		t.Fatal("accepted incomplete tool JSON")
+	if err := validateStructure(MessagesRoute, true, structureRevision(start, block, invalid, `{"type":"content_block_stop","index":0}`, `{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`, `{"type":"message_stop"}`)); err != nil {
+		t.Fatalf("unparseable tool input rejected: %v", err)
 	}
 }
 func TestMessagesParameterlessToolStream(t *testing.T) {

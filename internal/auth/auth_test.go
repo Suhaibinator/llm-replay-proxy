@@ -4,7 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +38,7 @@ func testAuthority(t *testing.T, now time.Time) *Authority {
 func sign(t *testing.T, header, claims map[string]any, key []byte) string {
 	t.Helper()
 	enc := func(v any) string {
-		raw, err := json.Marshal(v)
+		raw, err := json.Marshal(v, json.Deterministic(true))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,7 +121,7 @@ func TestVerifyRejects(t *testing.T) {
 	} else {
 		flip[0] = 'A'
 	}
-	payload, _ := json.Marshal(with("sub", "admin"))
+	payload, _ := json.Marshal(with("sub", "admin"), json.Deterministic(true))
 	cases := map[string]string{
 		"expired":           sign(t, hs256, with("exp", now.Add(-time.Minute).Unix()), key.b),
 		"not yet valid":     sign(t, hs256, with("nbf", now.Add(time.Hour).Unix()), key.b),
@@ -196,7 +196,7 @@ func TestKeyNeverPrints(t *testing.T) {
 			t.Fatalf("key leaked: %s", s)
 		}
 	}
-	if _, err := json.Marshal(wrapper); err == nil {
+	if _, err := json.Marshal(wrapper, json.Deterministic(true)); err == nil {
 		t.Fatal("key serialized to JSON")
 	}
 }
@@ -293,6 +293,9 @@ func TestMiddlewareCredentialForms(t *testing.T) {
 		{"x-api-key on api", "/api/settings", func(r *http.Request) { r.Header.Set("x-api-key", token) }, 200},
 		{"cookie on api", "/api/settings", func(r *http.Request) { r.AddCookie(&http.Cookie{Name: CookieName, Value: token}) }, 200},
 		{"cookie on inference", "/v1/chat/completions", func(r *http.Request) { r.AddCookie(&http.Cookie{Name: CookieName, Value: token}) }, 401},
+		{"bearer on mcp", "/mcp", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+token) }, 200},
+		{"cookie on mcp", "/mcp", func(r *http.Request) { r.AddCookie(&http.Cookie{Name: CookieName, Value: token}) }, 401},
+		{"missing on mcp", "/mcp", nil, 401},
 		{"missing on inference", "/v1/chat/completions", nil, 401},
 		{"missing on api", "/api/collections", nil, 401},
 		{"api root", "/api", nil, 401},
@@ -327,7 +330,10 @@ func TestMiddlewareCredentialForms(t *testing.T) {
 					t.Fatal("missing WWW-Authenticate: Bearer")
 				}
 				var body struct {
-					Error struct{ Code, Message string } `json:"error"`
+					Error struct {
+						Code    string `json:"code"`
+						Message string `json:"message"`
+					} `json:"error"`
 				}
 				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Error.Code != "unauthorized" || body.Error.Message == "" {
 					t.Fatalf("error shape: %s", w.Body)
@@ -417,6 +423,7 @@ func TestProtected(t *testing.T) {
 	for p, want := range map[string]bool{
 		"/v1/chat/completions": true, "/v1/responses": true, "/v1/messages": true, "/v1": true,
 		"/api/": true, "/api": true, "/api/collections/1/export": true, "/x/../api/settings": true,
+		"/mcp": true, "/mcp/": true, "/x/../mcp": true, "/mcpx": false,
 		"/": false, "/healthz": false, "/index.html": false, "/_next/static/a.js": false, "/v10": false, "/apis": false,
 	} {
 		if Protected(p) != want {

@@ -1,6 +1,6 @@
 package model
 
-import "encoding/json"
+import "encoding/json/jsontext"
 
 type Collection struct {
 	ID         int64    `json:"id"`
@@ -19,11 +19,11 @@ type Recording struct {
 	Route        string `json:"route"`
 	// Request and MatchingInput are never serialized: request bytes are served
 	// once, as exact text, by the endpoints that need them.
-	Request          json.RawMessage `json:"-"`
-	MatchingInput    json.RawMessage `json:"-"`
-	Streaming        bool            `json:"streaming"`
-	ActiveRevisionID int64           `json:"active_revision_id"`
-	CreatedAt        string          `json:"created_at"`
+	Request          jsontext.Value `json:"-"`
+	MatchingInput    jsontext.Value `json:"-"`
+	Streaming        bool           `json:"streaming"`
+	ActiveRevisionID int64          `json:"active_revision_id"`
+	CreatedAt        string         `json:"created_at"`
 }
 type Revision struct {
 	ID            int64             `json:"id"`
@@ -32,8 +32,8 @@ type Revision struct {
 	Headers       map[string]string `json:"headers"`
 	Body          string            `json:"body"`
 	Events        []Event           `json:"events"`
-	Request       json.RawMessage   `json:"-"`
-	MatchingInput json.RawMessage   `json:"-"`
+	Request       jsontext.Value    `json:"-"`
+	MatchingInput jsontext.Value    `json:"-"`
 	Source        string            `json:"source"`
 	CreatedAt     string            `json:"created_at"`
 }
@@ -101,6 +101,12 @@ type ResponseSummary struct {
 	OutputChars    int      `json:"output_chars"`
 	ReasoningChars int      `json:"reasoning_chars"`
 	ToolCalls      int      `json:"tool_calls"`
+	// GenerationMS is how long a stream took from its first data frame to its
+	// last frame as recorded; nil for a JSON body or a stream with no data.
+	GenerationMS *int64 `json:"generation_ms"`
+	// OutputTokensPerSecond is Usage.Output over GenerationMS, the speed the
+	// upstream produced this response at; nil when either is unknown or zero.
+	OutputTokensPerSecond *float64 `json:"output_tokens_per_second"`
 }
 
 type Entry struct {
@@ -113,9 +119,9 @@ type History struct {
 	Route        string `json:"route"`
 	// Provider names the configured upstream provider the request selected
 	// (explicitly or by default); empty when none could be resolved.
-	Provider string          `json:"provider"`
-	Key      string          `json:"key"`
-	Request  json.RawMessage `json:"-"`
+	Provider string         `json:"provider"`
+	Key      string         `json:"key"`
+	Request  jsontext.Value `json:"-"`
 	// Summary describes Request; nil when the call had no request body.
 	Summary     *RequestSummary `json:"request"`
 	Outcome     string          `json:"outcome"`
@@ -159,11 +165,24 @@ type Analytics struct {
 	Sources       map[string]SourceAnalytics `json:"sources"`
 	Series        []AnalyticsPoint           `json:"series"`
 }
+
+// Replay pacing modes.
+const (
+	PacingMultiplier      = "multiplier"
+	PacingTokensPerSecond = "tokens_per_second"
+)
+
 type Settings struct {
-	Mode               string  `json:"mode"`
-	ActiveCollectionID int64   `json:"active_collection_id"`
-	FirstEventDelayMS  int64   `json:"first_event_delay_ms"`
-	DelayMultiplier    float64 `json:"delay_multiplier"`
+	Mode               string `json:"mode"`
+	ActiveCollectionID int64  `json:"active_collection_id"`
+	// FirstEventDelayMS delays a replayed stream's first frame.
+	FirstEventDelayMS int64 `json:"first_event_delay_ms"`
+	// Pacing chooses how later frames are spaced: PacingMultiplier scales the
+	// recorded gaps by DelayMultiplier; PacingTokensPerSecond scales each
+	// recording's gaps so its output streams at TargetTokensPerSecond.
+	Pacing                string  `json:"pacing"`
+	DelayMultiplier       float64 `json:"delay_multiplier"`
+	TargetTokensPerSecond float64 `json:"target_tokens_per_second"`
 	// HistoryLimit is the number of history rows kept per collection; 0 keeps
 	// every row.
 	HistoryLimit int64 `json:"history_limit"`

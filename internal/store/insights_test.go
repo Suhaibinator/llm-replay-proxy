@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -24,7 +24,7 @@ func publishChat(t *testing.T, s *Store, cid int64, request any, response string
 
 func publishRoute(t *testing.T, s *Store, cid int64, route string, request any, response string) model.Entry {
 	t.Helper()
-	req, err := json.Marshal(request)
+	req, err := json.Marshal(request, json.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +75,9 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	b1 := publishChat(t, s, cid, bReq, chatResponse("", `{"prompt_tokens":10,"completion_tokens":5}`))
 	// A later edit must not change what earlier rows are attributed.
 	a2 := publishChat(t, s, cid, aReq, chatResponse("gpt-a-2025", `{"prompt_tokens":999,"completion_tokens":1}`))
-	aBody, _ := json.Marshal(aReq)
-	bBody, _ := json.Marshal(bReq)
-	missBody, _ := json.Marshal(chatRequest("gpt-a", "never recorded"))
+	aBody, _ := json.Marshal(aReq, json.Deterministic(true))
+	bBody, _ := json.Marshal(bReq, json.Deterministic(true))
+	missBody, _ := json.Marshal(chatRequest("gpt-a", "never recorded"), json.Deterministic(true))
 
 	row := func(minute int, outcome, lookup, source string, body []byte, rec model.Entry, revision int64, duration *int64) {
 		addHistory(t, s, model.History{CollectionID: cid, Route: chatRoute, Key: "k", Request: body, Outcome: outcome, CacheStatus: lookup, Source: source,
@@ -141,6 +141,13 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if !floatIs(tot.UpstreamCost, 0.01) || !floatIs(tot.SavedCost, 0.03) {
 		t.Fatalf("costs %v %v", tot.UpstreamCost, tot.SavedCost)
 	}
+	// One recorded and three hit rows reported a cost; a2 and b1 report none.
+	if tot.UpstreamCostCalls != 1 || tot.SavedCostCalls != 3 {
+		t.Fatalf("cost calls %d %d", tot.UpstreamCostCalls, tot.SavedCostCalls)
+	}
+	if s0, s1 := in.Series[0], in.Series[1]; !floatIs(s0.UpstreamCost, 0.01) || !floatIs(s0.SavedCost, 0.03) || s1.UpstreamCost != nil || s1.SavedCost != nil {
+		t.Fatalf("series costs %+v %+v", s0, s1)
+	}
 	if tot.Threads != 3 || in.Bucket != "hour" || len(in.Series) != 3 || in.From != "2026-03-01T10:00:00Z" {
 		t.Fatalf("threads %d bucket %s series %d from %s", tot.Threads, in.Bucket, len(in.Series), in.From)
 	}
@@ -166,6 +173,12 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if len(in.Routes) != 1 || in.Routes[0].Route != chatRoute || in.Routes[0].Requests != 13 || !floatIs(in.Routes[0].HitRate, 7.0/12) {
 		t.Fatalf("routes %+v", in.Routes)
 	}
+	if !floatIs(in.Routes[0].UpstreamCost, 0.01) || !floatIs(in.Routes[0].SavedCost, 0.03) {
+		t.Fatalf("route costs %+v", in.Routes[0])
+	}
+	if len(in.Providers) != 1 || !floatIs(in.Providers[0].UpstreamCost, 0.01) || !floatIs(in.Providers[0].SavedCost, 0.03) {
+		t.Fatalf("provider costs %+v", in.Providers)
+	}
 	// Replay durations 5, 20, 70, 50, 100000, 2 (one hit has none).
 	replay := in.Latency.Replay
 	counts := make([]int64, len(replay.Histogram))
@@ -185,6 +198,9 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if len(in.TopThreads) != 3 || in.TopThreads[0].Opening != "hello a" || in.TopThreads[0].Requests != 6 {
 		t.Fatalf("top threads %+v", in.TopThreads)
 	}
+	if top := in.TopThreads[0]; !floatIs(top.UpstreamCost, 0.01) || !floatIs(top.SavedCost, 0.03) || in.TopThreads[1].UpstreamCost != nil {
+		t.Fatalf("thread costs %+v %+v", top, in.TopThreads[1])
+	}
 
 	only, err := s.Insights(ctx, cid, from, to, InsightFilter{Model: "claude-x"})
 	if err != nil {
@@ -202,7 +218,7 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if err != nil || empty.Totals.HitRate != nil || empty.Totals.UpstreamCost != nil || empty.Models == nil || empty.TopThreads == nil {
 		t.Fatalf("empty insights %+v %v", empty.Totals, err)
 	}
-	b, _ := json.Marshal(empty)
+	b, _ := json.Marshal(empty, json.Deterministic(true))
 	var generic map[string]any
 	_ = json.Unmarshal(b, &generic)
 	if _, ok := generic["latency"].(map[string]any)["upstream"].(map[string]any)["histogram"].([]any); !ok {
@@ -214,7 +230,7 @@ func TestDeletedRecordingKeepsHistoryButDropsAttribution(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
 	e := publishChat(t, s, 1, chatRequest("m", "x"), chatResponse("m", `{"prompt_tokens":5,"completion_tokens":1}`))
-	body, _ := json.Marshal(chatRequest("m", "x"))
+	body, _ := json.Marshal(chatRequest("m", "x"), json.Deterministic(true))
 	now := time.Now().UTC()
 	addHistory(t, s, model.History{CollectionID: 1, Route: chatRoute, Key: "k", Request: body, Outcome: "hit", RecordingID: e.Recording.ID, RevisionID: e.Revision.ID, CreatedAt: now.Format(time.RFC3339Nano)})
 	if err := s.DeleteRecording(ctx, e.Recording.ID); err != nil {
@@ -240,7 +256,7 @@ func TestThreadsGroupByConversationAndListTurns(t *testing.T) {
 	r1 := publishChat(t, s, cid, turn1, chatResponse("m-1", `{"prompt_tokens":10,"completion_tokens":2}`))
 	r2 := publishChat(t, s, cid, turn2, chatResponse("m-1", `{"prompt_tokens":30,"completion_tokens":4}`))
 	other := chatRequest("m", "unrelated")
-	body := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	body := func(v any) []byte { b, _ := json.Marshal(v, json.Deterministic(true)); return b }
 
 	add := func(minute int, outcome string, req any, rec model.Entry) {
 		h := model.History{CollectionID: cid, Route: chatRoute, Key: "k", Outcome: outcome, RecordingID: rec.Recording.ID, CreatedAt: at(minute)}
@@ -341,7 +357,7 @@ func TestNearestComparesSmallRequestsWithFineChunks(t *testing.T) {
 	similar := publishChat(t, s, 1, ask("m", "what is the refund policy for annual plans?"), resp)
 	publishChat(t, s, 1, ask("other-model", "what is the refund policy for annual plans?"), resp)
 	publishChat(t, s, 1, chatRequest("m", "unrelated"), resp)
-	body, _ := json.Marshal(ask("m", "what is the refund policy for monthly plans?"))
+	body, _ := json.Marshal(ask("m", "what is the refund policy for monthly plans?"), json.Deterministic(true))
 	addHistory(t, s, model.History{CollectionID: 1, Route: chatRoute, Key: "k", Request: body, Outcome: "miss"})
 	rows, _ := s.History(ctx, 1, 1)
 	got, err := s.Nearest(ctx, rows[0].ID)
@@ -388,7 +404,7 @@ func TestNearestRanksSameThreadThenSharedContent(t *testing.T) {
 	sharedContent := publishRoute(t, s, cid, "/v1/responses", request("a different question"), resp)
 	publishRoute(t, s, cid, "/v1/responses", map[string]any{"model": "m", "input": "tiny unrelated " + bigText(2, 8<<10)}, resp)
 	exact := publishRoute(t, s, cid, "/v1/responses", missed, resp)
-	body, _ := json.Marshal(missed)
+	body, _ := json.Marshal(missed, json.Deterministic(true))
 	addHistory(t, s, model.History{CollectionID: cid, Route: "/v1/responses", Key: exact.Recording.Key, Request: body, Outcome: "miss"})
 	rows, err := s.History(ctx, cid, 1)
 	if err != nil {
@@ -412,5 +428,36 @@ func TestNearestRanksSameThreadThenSharedContent(t *testing.T) {
 	rows, _ = s.History(ctx, cid, 1)
 	if none, err := s.Nearest(ctx, rows[0].ID); err != nil || none == nil || len(none) != 0 {
 		t.Fatalf("bodiless row: %+v %v", none, err)
+	}
+}
+
+func TestInsightsMeasuresOutputTokensPerSecond(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	cid := int64(1)
+	base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	req := chatRequest("gpt-a", "hello")
+	rec := publishChat(t, s, cid, req, chatResponse("gpt-a", `{"prompt_tokens":10,"completion_tokens":50}`))
+	body, _ := json.Marshal(req, json.Deterministic(true))
+	for i, r := range []struct {
+		source          string
+		duration, first *int64
+	}{
+		{"upstream", ms(1100), ms(100)}, // 50 tokens over 1 s
+		{"replay", ms(600), ms(100)},    // over 0.5 s
+		{"replay", ms(350), ms(100)},    // over 0.25 s
+		{"replay", ms(600), nil},        // no first event: not measured
+		{"replay", ms(100), ms(100)},    // nothing after the first event: not measured
+	} {
+		addHistory(t, s, model.History{CollectionID: cid, Route: chatRoute, Key: "k", Request: body, Outcome: "hit", CacheStatus: "hit", Source: r.source,
+			RecordingID: rec.Recording.ID, RevisionID: rec.Revision.ID, DurationMS: r.duration, FirstEventMS: r.first, CreatedAt: base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano)})
+	}
+	in, err := s.Insights(ctx, cid, base, base.Add(time.Hour), InsightFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, replay := in.Latency.Upstream.OutputTokensPerSecond, in.Latency.Replay.OutputTokensPerSecond
+	if up.Samples != 1 || *up.P50 != 50 || replay.Samples != 2 || *replay.P50 != 100 || *replay.P95 != 200 {
+		t.Fatalf("upstream %+v, replay %+v", up, replay)
 	}
 }

@@ -2,13 +2,13 @@
 package admin
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"maps"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/match"
 	"github.com/local/llm-replay-proxy/internal/model"
 	"github.com/local/llm-replay-proxy/internal/protocol"
@@ -26,7 +27,6 @@ import (
 
 const maxImportSize = 1 << 30
 const maxEditSize = 128 << 20
-const maxDelayMultiplier = 1_000_000
 const maxDelayMS = int64(24 * time.Hour / time.Millisecond)
 
 type handler struct{ db *store.Store }
@@ -255,8 +255,8 @@ func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_settings", fmt.Sprintf("first_event_delay_ms must be between 0 and %d", maxDelayMS))
 			return
 		}
-		if v.DelayMultiplier < 0 || math.IsNaN(v.DelayMultiplier) || math.IsInf(v.DelayMultiplier, 0) || v.DelayMultiplier > maxDelayMultiplier {
-			writeError(w, http.StatusBadRequest, "invalid_settings", fmt.Sprintf("delay_multiplier must be between 0 and %d", maxDelayMultiplier))
+		if err := store.ValidatePacing(v); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_settings", err.Error())
 			return
 		}
 		if v.HistoryLimit < 0 || v.HistoryLimit > store.MaxHistoryLimit {
@@ -545,8 +545,8 @@ func (h *handler) edit(w http.ResponseWriter, r *http.Request, id int64) {
 	// Request provenance is immutable metadata, not part of the editable response.
 	// Always retain its exact bytes; browser JSON parsing can otherwise round large
 	// request numbers even when the operator only edits response events.
-	revision.Request = append(json.RawMessage(nil), e.Revision.Request...)
-	revision.MatchingInput = append(json.RawMessage(nil), e.Revision.MatchingInput...)
+	revision.Request = e.Revision.Request.Clone()
+	revision.MatchingInput = e.Revision.MatchingInput.Clone()
 	if err == nil {
 		err = validateHeaders(revision.Headers)
 	}
@@ -679,37 +679,15 @@ func (h *handler) importDB(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, v)
 }
 
-type difference struct {
-	Path            string `json:"path"`
-	Request         any    `json:"request"`
-	Recorded        any    `json:"recorded"`
-	RequestExists   bool   `json:"request_exists"`
-	RecordedExists  bool   `json:"recorded_exists"`
-	RequestDisplay  string `json:"request_display"`
-	RecordedDisplay string `json:"recorded_display"`
-	// Excluded marks a path under one of the collection's match exclusions:
-	// the difference did not affect matching.
-	Excluded bool `json:"excluded"`
-}
-
-// markExcluded flags the differences that the collection's exclusions hide
-// from matching.
-func markExcluded(d []difference, exclusions []string) []difference {
-	for i := range d {
-		d[i].Excluded = match.Excluded(d[i].Path, exclusions)
-	}
-	return d
-}
-
 func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, "POST")
 		return
 	}
 	var in struct {
-		Request     json.RawMessage `json:"request"`
-		RecordingID int64           `json:"recording_id"`
-		HistoryID   int64           `json:"history_id"`
+		Request     jsontext.Value `json:"request"`
+		RecordingID int64          `json:"recording_id"`
+		HistoryID   int64          `json:"history_id"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -740,19 +718,19 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		}
 		in.Request = history.Request
 		if history.Route != e.Recording.Route {
-			d := []difference{newDifference("/$route", history.Route, e.Recording.Route, true, true)}
+			d := []match.Difference{match.NewDifference("/$route", history.Route, e.Recording.Route, true, true)}
 			var a, b any
-			if decodeJSONValue(in.Request, &a) != nil || decodeJSONValue(e.Recording.Request, &b) != nil {
+			if match.DecodeJSON(in.Request, &a) != nil || match.DecodeJSON(e.Recording.Request, &b) != nil {
 				writeError(w, 400, "invalid_request", "stored request is not valid JSON")
 				return
 			}
-			diffJSON("", a, b, &d)
-			writeJSON(w, 200, map[string]any{"differences": markExcluded(d, collection.Exclusions)})
+			match.DiffJSON("", match.Normalize(history.Route, a), match.Normalize(e.Recording.Route, b), &d)
+			writeJSON(w, 200, map[string]any{"differences": match.MarkExcluded(d, collection.Exclusions)})
 			return
 		}
 	}
 	var a, b any
-	if decodeJSONValue(in.Request, &a) != nil || decodeJSONValue(e.Recording.Request, &b) != nil {
+	if match.DecodeJSON(in.Request, &a) != nil || match.DecodeJSON(e.Recording.Request, &b) != nil {
 		writeError(w, 400, "invalid_request", "request must be a JSON value")
 		return
 	}
@@ -760,100 +738,11 @@ func (h *handler) compare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_request", "request must be a JSON object")
 		return
 	}
-	d := make([]difference, 0)
-	diffJSON("", a, b, &d)
-	writeJSON(w, 200, map[string]any{"differences": markExcluded(d, collection.Exclusions)})
-}
-
-func diffJSON(path string, a, b any, out *[]difference) {
-	am, aok := a.(map[string]any)
-	bm, bok := b.(map[string]any)
-	if aok && bok {
-		keys := map[string]struct{}{}
-		for k := range am {
-			keys[k] = struct{}{}
-		}
-		for k := range bm {
-			keys[k] = struct{}{}
-		}
-		names := make([]string, 0, len(keys))
-		for k := range keys {
-			names = append(names, k)
-		}
-		sortStrings(names)
-		for _, k := range names {
-			av, aexists := am[k]
-			bv, bexists := bm[k]
-			p := path + "/" + escapePointer(k)
-			if !aexists {
-				*out = append(*out, newDifference(p, nil, bv, false, true))
-			} else if !bexists {
-				*out = append(*out, newDifference(p, av, nil, true, false))
-			} else {
-				diffJSON(p, av, bv, out)
-			}
-		}
-		return
-	}
-	aa, aok := a.([]any)
-	ba, bok := b.([]any)
-	if aok && bok {
-		n := len(aa)
-		if len(ba) > n {
-			n = len(ba)
-		}
-		for i := 0; i < n; i++ {
-			p := fmt.Sprintf("%s/%d", path, i)
-			if i >= len(aa) {
-				*out = append(*out, newDifference(p, nil, ba[i], false, true))
-			} else if i >= len(ba) {
-				*out = append(*out, newDifference(p, aa[i], nil, true, false))
-			} else {
-				diffJSON(p, aa[i], ba[i], out)
-			}
-		}
-		return
-	}
-	if !equalJSON(a, b) {
-		if path == "" {
-			path = "/"
-		}
-		*out = append(*out, newDifference(path, a, b, true, true))
-	}
-}
-
-func newDifference(path string, request, recorded any, requestExists, recordedExists bool) difference {
-	return difference{Path: path, Request: request, Recorded: recorded, RequestExists: requestExists, RecordedExists: recordedExists, RequestDisplay: displayJSON(request, requestExists), RecordedDisplay: displayJSON(recorded, recordedExists)}
-}
-
-func displayJSON(v any, exists bool) string {
-	if !exists {
-		return "(missing)"
-	}
-	b, _ := json.Marshal(v)
-	return string(b)
-}
-
-func sortStrings(v []string) {
-	for i := 1; i < len(v); i++ {
-		for j := i; j > 0 && v[j] < v[j-1]; j-- {
-			v[j], v[j-1] = v[j-1], v[j]
-		}
-	}
-}
-func escapePointer(v string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(v, "~", "~0"), "/", "~1")
-}
-func equalJSON(a, b any) bool {
-	x, _ := json.Marshal(a)
-	y, _ := json.Marshal(b)
-	return string(x) == string(y)
-}
-
-func decodeJSONValue(raw []byte, dst any) error {
-	d := json.NewDecoder(strings.NewReader(string(raw)))
-	d.UseNumber()
-	return d.Decode(dst)
+	// Both sides are normalized as matching does, so tool order and key order
+	// inside tool JSON are not reported as differences.
+	d := make([]match.Difference, 0)
+	match.DiffJSON("", match.Normalize(e.Recording.Route, a), match.Normalize(e.Recording.Route, b), &d)
+	writeJSON(w, 200, map[string]any{"differences": match.MarkExcluded(d, collection.Exclusions)})
 }
 
 var responseHeaderAllowlist = map[string]bool{
@@ -874,9 +763,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return decodeJSONLimit(w, r, v, 16<<20)
 }
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
-	d.DisallowUnknownFields()
-	if err := d.Decode(v); err != nil {
+	d := jsontext.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	if err := json.UnmarshalDecode(d, v, json.RejectUnknownMembers(true)); err != nil {
 		if tooLarge(err) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body exceeds %d bytes", limit))
 			return false
@@ -884,7 +772,7 @@ func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64)
 		writeError(w, 400, "invalid_json", err.Error())
 		return false
 	}
-	if err := d.Decode(&struct{}{}); err != io.EOF {
+	if _, err := d.ReadToken(); err != io.EOF {
 		if tooLarge(err) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body exceeds %d bytes", limit))
 			return false
@@ -951,7 +839,9 @@ func methodNotAllowed(w http.ResponseWriter, allow string) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if json.MarshalWrite(w, v, jsontree.Stable...) == nil {
+		_, _ = w.Write([]byte("\n"))
+	}
 }
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg}})

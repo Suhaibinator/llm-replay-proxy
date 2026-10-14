@@ -301,7 +301,11 @@ export function TopThreadsPanel({
                   </span>
                   <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
                     {t.model || "unknown model"} · {formatCount(t.max_items)}{" "}
-                    items · {formatAgo(t.last_at)}
+                    items
+                    {t.upstream_cost != null && (
+                      <> · {formatCost(t.upstream_cost)} spent</>
+                    )}{" "}
+                    · {formatAgo(t.last_at)}
                   </span>
                   <SplitBar
                     className="mt-1.5"

@@ -4,6 +4,7 @@ import { Check, Download, Plus, Upload } from "lucide-react";
 import {
   type Collection,
   type NumberSetting,
+  type Pacing,
   type Settings,
   APIError,
   count,
@@ -19,6 +20,19 @@ import { ErrorBanner, ViewHeader } from "@/components/common";
 import { ConfirmAction } from "@/components/inspector";
 import { MODES } from "@/components/shell/mode-switch";
 import { cn } from "@/lib/utils";
+
+const PACINGS: { value: Pacing; label: string; long: string }[] = [
+  {
+    value: "multiplier",
+    label: "Scale recorded gaps",
+    long: "Scale every recorded gap: 1 is the original speed, 0.5 twice as fast, 0 no gaps.",
+  },
+  {
+    value: "tokens_per_second",
+    label: "Target output speed",
+    long: "Stream each recording's output at this speed, keeping its rhythm. Waits before the first output are skipped; recordings without an output token count keep their recorded speed.",
+  },
+];
 
 /** What the settings view needs from the shell beyond ViewProps. */
 export type SettingsShell = {
@@ -38,7 +52,15 @@ const message = (e: unknown) =>
 
 const limits: Record<
   NumberSetting,
-  { label: string; min: number; max: number; integer: boolean; help: string }
+  {
+    label: string;
+    min: number;
+    max: number;
+    integer: boolean;
+    /** min itself is not allowed. */
+    exclusiveMin?: boolean;
+    help: string;
+  }
 > = {
   first_event_delay_ms: {
     label: "First event delay (ms)",
@@ -53,6 +75,14 @@ const limits: Record<
     max: 1_000_000,
     integer: false,
     help: "Delay multiplier must be between 0 and 1000000.",
+  },
+  target_tokens_per_second: {
+    label: "Target output tokens per second",
+    min: 0,
+    max: 1_000_000,
+    integer: false,
+    exclusiveMin: true,
+    help: "Target tokens per second must be greater than 0 and at most 1000000.",
   },
   history_limit: {
     label: "Requests kept per collection",
@@ -116,7 +146,7 @@ export function SettingsView({
     const valid =
       raw.trim() !== "" &&
       Number.isFinite(value) &&
-      value >= rule.min &&
+      (rule.exclusiveMin ? value > rule.min : value >= rule.min) &&
       value <= rule.max &&
       (!rule.integer || Number.isInteger(value));
     if (!valid) {
@@ -212,7 +242,14 @@ export function SettingsView({
     }
   }
   const instant =
-    settings.first_event_delay_ms === 0 && settings.delay_multiplier === 0;
+    settings.first_event_delay_ms === 0 &&
+    settings.pacing === "multiplier" &&
+    settings.delay_multiplier === 0;
+  const pacingSummary = instant
+    ? "Events are sent as fast as the client reads them."
+    : settings.pacing === "tokens_per_second"
+      ? `First event after ${settings.first_event_delay_ms.toLocaleString()} ms, then output at ${settings.target_tokens_per_second.toLocaleString()} tokens per second.`
+      : `First event after ${settings.first_event_delay_ms.toLocaleString()} ms, later gaps × ${settings.delay_multiplier}.`;
 
   return (
     <div className="space-y-6">
@@ -405,9 +442,10 @@ export function SettingsView({
                 </ul>
               )}
               <p className="mt-3 text-xs text-muted-foreground">
-                Property order is ignored; array order, strings and numeric
-                precision are exact. Streaming and non-streaming requests never
-                match each other.
+                Property order is ignored, as are the order of tool definitions
+                and the key order of JSON inside tool arguments and results.
+                Other array order, strings and numeric precision are exact.
+                Streaming and non-streaming requests never match each other.
               </p>
             </Card>
           ) : (
@@ -458,12 +496,41 @@ export function SettingsView({
 
         <Section
           title="Replay timing"
-          description="Recorded streams replay with their original cadence. Delay the first event and scale the gaps between later ones, or play back instantly."
+          description="Recorded streams replay with their original cadence. Delay the first event, then pace the rest by scaling the recorded gaps or by a target output speed, or play back instantly."
         >
           <Card className="space-y-4 p-4">
             <div className="grid gap-4 sm:grid-cols-2">
               {numberInput("first_event_delay_ms", "1")}
-              {numberInput("delay_multiplier", "0.1")}
+            </div>
+            <fieldset className="space-y-2" disabled={disabled}>
+              <legend className="mb-2 text-[13px] font-medium">
+                Pace later events by
+              </legend>
+              {PACINGS.map((p) => (
+                <label
+                  key={p.value}
+                  className="flex cursor-pointer items-start gap-3 text-[13px]"
+                >
+                  <input
+                    type="radio"
+                    name="replay-pacing"
+                    className="mt-1 accent-primary"
+                    checked={settings.pacing === p.value}
+                    onChange={() => void saveSettings({ pacing: p.value })}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium">{p.label}</span>
+                    <span className="mt-0.5 block text-muted-foreground">
+                      {p.long}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {settings.pacing === "tokens_per_second"
+                ? numberInput("target_tokens_per_second", "1")
+                : numberInput("delay_multiplier", "0.1")}
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button
@@ -473,6 +540,7 @@ export function SettingsView({
                 onClick={() =>
                   void saveSettings({
                     first_event_delay_ms: 0,
+                    pacing: "multiplier",
                     delay_multiplier: 0,
                   })
                 }
@@ -480,11 +548,7 @@ export function SettingsView({
                 {instant && <Check className="size-3.5" aria-hidden />}
                 Instant playback
               </Button>
-              <p className="text-xs text-muted-foreground">
-                {instant
-                  ? "Events are sent as fast as the client reads them."
-                  : `First event after ${settings.first_event_delay_ms.toLocaleString()} ms, later gaps × ${settings.delay_multiplier}.`}
-              </p>
+              <p className="text-xs text-muted-foreground">{pacingSummary}</p>
             </div>
           </Card>
         </Section>

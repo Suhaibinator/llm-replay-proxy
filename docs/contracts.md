@@ -26,7 +26,7 @@ issues, refreshes, lists, or revokes tokens.
 
 | Endpoint | Method | Request / result |
 | --- | --- | --- |
-| `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `delay_multiplier`, `history_limit` |
+| `/api/settings` | GET, PUT | Full settings object: `mode`, `active_collection_id`, `first_event_delay_ms`, `pacing` (`multiplier` or `tokens_per_second`), `delay_multiplier`, `target_tokens_per_second` (> 0), `history_limit` |
 | `/api/collections` | GET, POST | POST `{name, exclusions}`; matching rules remain immutable |
 | `/api/collections/N` | DELETE | 204; deletes the collection, its recordings and its history. 409 `collection_active` for the active collection |
 | `/api/recordings?collection_id=N` | GET | Recordings, newest first, each with a request summary (`request`), the active revision's response summary (`response`), `updated_at`, active revision `source`, `revisions`, `hits` and `last_hit_at` |
@@ -76,8 +76,22 @@ user-written text), `opening` (the start of the first user-written text),
 `tool_calls`, `images`, `bytes`, and `thread`, a fingerprint of the
 conversation's opening shared by its later turns. A response summary
 (`ResponseSummary` in [dashboard API](dashboard-api.md)) describes a stored
-revision. Summaries are computed when a read first needs them and saved, not
-when a request is recorded.
+revision. Summaries are computed when a request or revision is stored, outside
+the database's write lock. One stored by an older build (or by a different
+summary version) is computed by the first read that needs it and saved in the
+background.
+
+Storage runs SQLite in WAL mode with one writer connection and a pool of
+read-only connections, so lookups and dashboard reads never wait for a write.
+The proxy's writes are committed in groups: one transaction carries every
+publication and history row queued while the previous one committed. A
+publication returns only after its transaction is synced to disk; history
+rows commit without their own sync (WAL keeps the database consistent, and a
+power loss can drop only the last moments of history). Closing the store
+commits everything queued. The database belongs on local disk: on a network
+filesystem every lock and sync is a round trip, and WAL is safe there only
+while a single host opens the file; the proxy logs a warning at startup when
+the database is on NFS.
 
 `history_limit` (default 10000, 0 keeps everything) is the number of history
 rows kept per collection; older rows are deleted at startup and every 10
@@ -122,9 +136,18 @@ with no `response.output_text.delta` event to rewrite.
 
 Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
 exclusions also matches as `[]`. The key is the SHA-256 of the matching input
-`{"version":2,"api":…,"body":…}`, where `api` is `chat_completions`,
+`{"version":3,"api":…,"body":…}`, where `api` is `chat_completions`,
 `responses` or `messages` and `body` is the canonical request after collection
-exclusions. The upstream provider, URL and headers are not part of it, so a
+exclusions. Canonical JSON is RFC 8785 (JCS) via `encoding/json/jsontext`:
+sorted member names, minimal string escapes and no whitespace. Numbers are the
+one exception: they keep their exact lexeme rather than being rounded through
+float64, so `1` and `1.0` differ. Duplicate member names, invalid UTF-8 and
+unpaired surrogate escapes are rejected. Exclusions apply to the request as sent. Then the `tools` array is
+sorted by each tool's canonical JSON, and JSON objects or arrays embedded in
+tool-call argument and tool-result strings are re-encoded canonically (sorted
+keys, no whitespace, exact numbers), still as strings. Other strings are never
+reinterpreted. The comparison API diffs the requests after the same
+normalization, so tool paths use the sorted order. The upstream provider, URL and headers are not part of it, so a
 recording replays whichever provider a request selects. The input is derived
 whenever it is displayed and is not stored.
 

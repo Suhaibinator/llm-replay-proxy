@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -254,7 +254,7 @@ func BenchmarkEventStorageDecode(b *testing.B) {
 		events[i] = model.Event{Data: fmt.Sprintf("data: {\"id\":\"example\",\"choices\":[{\"delta\":{\"content\":\" word%d\"}}]}\n\n", i), OffsetMS: int64(i * 20)}
 	}
 	binaryPacked, _ := encodeEvents(events)
-	j, _ := json.Marshal(events)
+	j, _ := json.Marshal(events, json.Deterministic(true))
 	jsonPacked := responseEncoder.EncodeAll(j, nil)
 	b.Run("binary", func(b *testing.B) {
 		b.ReportAllocs()

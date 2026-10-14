@@ -150,6 +150,38 @@ function argumentsValue(value: JSONValue | undefined): JSONValue {
     return value;
   }
 }
+/** Whether an SSE frame carries a data line (keep-alives carry only comments). */
+function hasSSEData(frame: string): boolean {
+  return frame
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .some((line) => line === "data" || line.startsWith("data:"));
+}
+
+/**
+ * A recorded stream's output speed, as the server computes it: output tokens
+ * (output_tokens, or completion_tokens for chat) over the time from the first
+ * data frame to the last frame. Null when either is unknown or zero.
+ */
+export function outputSpeed(
+  events: ResponseEvent[],
+  usage: JSONValue | undefined,
+): { tokensPerSecond: number; generationMS: number } | null {
+  const first = events.find((e) => hasSSEData(e.data));
+  if (!first) return null;
+  const generationMS = events[events.length - 1].offset_ms - first.offset_ms;
+  const u = object(usage);
+  const raw = u.output_tokens ?? u.completion_tokens;
+  const tokens =
+    raw instanceof JSONNumber
+      ? Number(raw.source)
+      : typeof raw === "number"
+        ? raw
+        : NaN;
+  if (!(tokens > 0) || !(generationMS > 0)) return null;
+  return { tokensPerSecond: (tokens * 1000) / generationMS, generationMS };
+}
+
 export function parseEvents(events: ResponseEvent[]): ParsedEvent[] {
   return events.map((event) => {
     let name = "message";

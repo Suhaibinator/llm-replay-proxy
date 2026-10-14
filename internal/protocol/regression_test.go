@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json/v2"
 	"strings"
 	"testing"
 
@@ -184,8 +185,10 @@ func TestChatToolCallsWithoutIndex(t *testing.T) {
 	bad := chatStream(
 		`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"a","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"b","arguments":"{"}}]},"finish_reason":null}]}`,
 		`{"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`, `[DONE]`)
-	if err := Validate(ChatRoute, true, bad); err == nil {
-		t.Fatal("malformed positional tool call accepted")
+	// Positional calls stay separate: the second call's unparseable arguments
+	// neither merge into the first nor stop the response being recorded.
+	if err := Validate(ChatRoute, true, bad); err != nil {
+		t.Fatalf("unparseable positional tool call rejected: %v", err)
 	}
 }
 
@@ -251,8 +254,9 @@ func TestAnthropicMCPToolUseStream(t *testing.T) {
 	bad := rev
 	bad.Events = append([]model.Event(nil), rev.Events...)
 	bad.Events[3] = event(3, "", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"hi\""}}`)
-	if err := Validate(MessagesRoute, true, bad); err == nil {
-		t.Fatal("incomplete MCP tool input accepted")
+	// Tool input the model left unparseable is still a complete response.
+	if err := Validate(MessagesRoute, true, bad); err != nil {
+		t.Fatalf("unparseable MCP tool input rejected: %v", err)
 	}
 	dup := `{"type":"message","stop_reason":"end_turn","content":[{"type":"mcp_tool_use","id":"d","name":"a","server_name":"s","input":{}},{"type":"mcp_tool_use","id":"d","name":"b","server_name":"s","input":{}}]}`
 	if err := Validate(MessagesRoute, false, model.Revision{Status: 200, Body: dup}); err == nil {
@@ -367,5 +371,37 @@ func TestSSEBareFieldsAndBOM(t *testing.T) {
 		if err := Validate(ChatRoute, true, r); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
+	}
+}
+
+// A model that runs into its output token limit mid-call can leave function
+// arguments that do not parse while the provider still reports the response
+// completed. The response is complete as a stream, so it is recorded and
+// replayed as sent; the application decides what to do with the arguments.
+func TestCompletedResponseWithUnparseableArgumentsIsRecordable(t *testing.T) {
+	args := `{"question_ref":"q2","patch":{"criteria":` + strings.Repeat(" \n", 50)
+	quoted, _ := json.Marshal(args)
+	half := len(args) / 2
+	first, _ := json.Marshal(args[:half])
+	rest, _ := json.Marshal(args[half:])
+	item := `{"id":"fc1","type":"function_call","status":"completed","call_id":"call1","name":"patch_question","arguments":` + string(quoted) + `}`
+	rev := chatStream(
+		`{"type":"response.created","response":{"id":"r","status":"in_progress","output":[]}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc1","type":"function_call","status":"in_progress","call_id":"call1","name":"patch_question","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc1","delta":`+string(first)+`}`,
+		`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc1","delta":`+string(rest)+`}`,
+		`{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc1","arguments":`+string(quoted)+`}`,
+		`{"type":"response.output_item.done","output_index":0,"item":`+item+`}`,
+		`{"type":"response.completed","response":{"id":"r","status":"completed","output":[`+item+`],"usage":{"input_tokens":10,"output_tokens":32000}}}`,
+	)
+	if err := Validate(ResponsesRoute, true, rev); err != nil {
+		t.Fatalf("completed response with unparseable arguments rejected: %v", err)
+	}
+	// Deltas must still agree with the completed arguments.
+	bad := rev
+	bad.Events = append([]model.Event(nil), rev.Events...)
+	bad.Events[3] = event(3, "", `{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc1","delta":"x"}`)
+	if err := Validate(ResponsesRoute, true, bad); err == nil {
+		t.Fatal("arguments that disagree with their deltas accepted")
 	}
 }

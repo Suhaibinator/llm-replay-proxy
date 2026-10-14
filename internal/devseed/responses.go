@@ -1,10 +1,11 @@
 package devseed
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"strings"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -25,7 +26,7 @@ type reply struct {
 type toolCall struct{ id, name, args string }
 
 func mustJSON(v any) string {
-	b, err := json.Marshal(v)
+	b, err := jsontree.Marshal(v)
 	if err != nil {
 		panic(err)
 	}

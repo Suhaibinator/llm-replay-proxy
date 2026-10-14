@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -165,9 +165,19 @@ func TestServerRequiresTokensAndNeverForwardsThem(t *testing.T) {
 			t.Fatalf("%s: %d", p, resp.StatusCode)
 		}
 	}
+	// The MCP endpoint shares the listener and accepts the bearer token.
+	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`
+	mcpResp := send("POST", "/mcp", initialize, func(r *http.Request) {
+		bearer(r)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Accept", "application/json, text/event-stream")
+	})
+	if b, _ := io.ReadAll(mcpResp.Body); mcpResp.StatusCode != 200 || !strings.Contains(string(b), `"llm-replay-proxy"`) {
+		t.Fatalf("mcp initialize: %d %s", mcpResp.StatusCode, b)
+	}
 	// Protected without a token.
 	chat := `{"model":"m","messages":[{"role":"user","content":"hello"}]}`
-	for _, tc := range []struct{ method, path, body string }{{"GET", "/api/settings", ""}, {"GET", "/api/history?collection_id=1", ""}, {"POST", "/v1/chat/completions", chat}, {"GET", "/api/collections/1/export", ""}} {
+	for _, tc := range []struct{ method, path, body string }{{"GET", "/api/settings", ""}, {"GET", "/api/history?collection_id=1", ""}, {"POST", "/v1/chat/completions", chat}, {"GET", "/api/collections/1/export", ""}, {"POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"ping"}`}} {
 		resp := send(tc.method, tc.path, tc.body, nil)
 		if resp.StatusCode != 401 || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Bearer") {
 			t.Fatalf("%s %s without token: %d", tc.method, tc.path, resp.StatusCode)
@@ -180,11 +190,11 @@ func TestServerRequiresTokensAndNeverForwardsThem(t *testing.T) {
 	// Switch to record mode with a bearer token.
 	resp := send("GET", "/api/settings", "", bearer)
 	var settings map[string]any
-	if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&settings) != nil {
+	if resp.StatusCode != 200 || json.UnmarshalRead(resp.Body, &settings) != nil {
 		t.Fatalf("settings: %d", resp.StatusCode)
 	}
 	settings["mode"] = "record"
-	raw, _ := json.Marshal(settings)
+	raw, _ := json.Marshal(settings, json.Deterministic(true))
 	if resp := send("PUT", "/api/settings", string(raw), func(r *http.Request) {
 		r.Header.Set("x-api-key", token)
 		r.Header.Set("Content-Type", "application/json")

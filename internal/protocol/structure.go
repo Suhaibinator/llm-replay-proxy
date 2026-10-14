@@ -1,11 +1,11 @@
 package protocol
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -32,11 +32,11 @@ func validateStructure(route string, streaming bool, rev model.Revision) error {
 }
 
 func indexField(o map[string]any, field string) (int, error) {
-	n, ok := o[field].(json.Number)
+	n, ok := jsontree.Number(o[field])
 	if !ok {
 		return 0, fmt.Errorf("%s must be a nonnegative integer", field)
 	}
-	i, err := strconv.ParseInt(string(n), 10, 32)
+	i, err := strconv.ParseInt(n, 10, 32)
 	if err != nil || i < 0 {
 		return 0, fmt.Errorf("%s must be a nonnegative integer", field)
 	}
@@ -337,9 +337,6 @@ func responsesStructure(objects []map[string]any) error {
 				if !ok {
 					return fmt.Errorf("function arguments must be a string")
 				}
-				if err := validArguments(args); err != nil {
-					return err
-				}
 				if it.hasArguments && args != it.arguments.String() {
 					return fmt.Errorf("function arguments done disagrees with deltas")
 				}
@@ -564,8 +561,8 @@ func checkResponseItem(it *responseItem, item map[string]any, final bool) error 
 		}
 	}
 	if final && it.snapshot != nil {
-		prior, _ := json.Marshal(it.snapshot["content"])
-		current, _ := json.Marshal(item["content"])
+		prior, _ := jsontree.Marshal(it.snapshot["content"])
+		current, _ := jsontree.Marshal(item["content"])
 		if string(prior) != string(current) {
 			return fmt.Errorf("output_item.done content disagrees with final output")
 		}
@@ -703,13 +700,6 @@ func messagesStructure(objects []map[string]any) error {
 			block := blocks[idx]
 			if block == nil || !block.open {
 				return fmt.Errorf("stop targets an unopened block")
-			}
-			// Parameterless tools stream only an empty partial_json; the
-			// object input from content_block_start then stands.
-			if block.hasArguments && block.arguments.Len() > 0 {
-				if err := validArguments(block.arguments.String()); err != nil {
-					return err
-				}
 			}
 			block.open = false
 		case "message_delta":
@@ -887,23 +877,19 @@ func bodyStructure(route, body string) error {
 	return nil
 }
 
-// Completed function arguments must form one JSON object. This is a structural
-// check only: tool-specific application schemas remain the application's job.
-func validArguments(arguments string) error {
-	if _, err := bodyObject(arguments); err != nil {
-		return fmt.Errorf("tool arguments must be a complete JSON object: %w", err)
-	}
-	return nil
-}
+// Function arguments must be a string, but need not be valid JSON: they are
+// model output, recorded and replayed as received. A model can emit arguments
+// that do not parse (for example when it stops at its output token limit
+// mid-call); judging them is the application's job, and replaying them lets
+// the application's handling be reproduced.
 func functionArguments(function map[string]any) error {
 	if _, err := requiredString(function, "name"); err != nil {
 		return err
 	}
-	arguments, ok := function["arguments"].(string)
-	if !ok {
+	if _, ok := function["arguments"].(string); !ok {
 		return fmt.Errorf("function arguments must be a string")
 	}
-	return validArguments(arguments)
+	return nil
 }
 func responseFunction(item map[string]any) error {
 	if _, err := requiredString(item, "call_id"); err != nil {

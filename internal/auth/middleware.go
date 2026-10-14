@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"path"
 	"strings"
@@ -19,11 +19,12 @@ const (
 )
 
 // Protected reports whether a request path requires a token: every inference
-// route under /v1/ and every control route under /api/. The cleaned path is
-// checked as well so dot segments cannot reach a protected handler unchecked.
+// route under /v1/, every control route under /api/, and the MCP endpoint
+// /mcp. The cleaned path is checked as well so dot segments cannot reach a
+// protected handler unchecked.
 func Protected(p string) bool {
 	for _, candidate := range []string{p, path.Clean("/" + p)} {
-		for _, prefix := range []string{"/v1", "/api"} {
+		for _, prefix := range []string{"/v1", "/api", "/mcp"} {
 			if candidate == prefix || strings.HasPrefix(candidate, prefix+"/") {
 				return true
 			}
@@ -39,7 +40,7 @@ func Protected(p string) bool {
 // Accepted credentials:
 //   - `Authorization: Bearer <jwt>` (OpenAI SDKs, curl)
 //   - `x-api-key: <jwt>` (Anthropic SDK)
-//   - the console cookie, for /api/ only. Inference routes do not accept it,
+//   - the console cookie, for /api/ only. Inference and MCP routes do not accept it,
 //     so a page on another port of the same host cannot spend upstream keys
 //     through the browser's cookie.
 func (a *Authority) Middleware(next http.Handler) http.Handler {
@@ -91,10 +92,10 @@ func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+	_ = json.MarshalWrite(w, map[string]any{"error": map[string]string{
 		"code":    "unauthorized",
 		"message": "a valid access token is required; issue one with `replay-proxy token issue`",
-	}})
+	}}, json.Deterministic(true))
 }
 
 // login exchanges `?token=<jwt>` for an HttpOnly console cookie and

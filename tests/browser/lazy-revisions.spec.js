@@ -60,7 +60,9 @@ async function fixtures(page, detail) {
             mode: "replay",
             active_collection_id: 1,
             first_event_delay_ms: 0,
+            pacing: "multiplier",
             delay_multiplier: 0,
+            target_tokens_per_second: 100,
             history_limit: 10000,
           }
         : path === "/api/collections"

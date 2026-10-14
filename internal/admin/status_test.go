@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,10 @@ import (
 func errorCode(t *testing.T, w *httptest.ResponseRecorder) (string, string) {
 	t.Helper()
 	var body struct {
-		Error struct{ Code, Message string } `json:"error"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode error body %q: %v", w.Body.String(), err)
@@ -112,7 +116,7 @@ func (b *racingBody) Read(p []byte) (int, error) {
 func TestEditStoreConflictUsesRevisionConflictCode(t *testing.T) {
 	db, h := testAdmin(t)
 	e := publishFixture(t, db)
-	payload, _ := json.Marshal(map[string]any{"text": "mine", "base_revision_id": e.Revision.ID})
+	payload, _ := json.Marshal(map[string]any{"text": "mine", "base_revision_id": e.Revision.ID}, json.Deterministic(true))
 	body := &racingBody{r: bytes.NewReader(payload), race: func() {
 		rev := e.Revision
 		rev.ID, rev.Source = 0, "recorded"
@@ -220,7 +224,7 @@ func TestHeadIsAllowedWhereverGetIs(t *testing.T) {
 func TestExportOmitsHistory(t *testing.T) {
 	db, h := testAdmin(t)
 	e := publishFixture(t, db)
-	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: "k", Request: json.RawMessage(`{"secret":"history-marker-91ab"}`), Outcome: "miss"}); err != nil {
+	if err := db.AddHistory(context.Background(), model.History{CollectionID: e.Recording.CollectionID, Route: e.Recording.Route, Key: "k", Request: jsontext.Value(`{"secret":"history-marker-91ab"}`), Outcome: "miss"}); err != nil {
 		t.Fatal(err)
 	}
 	w := request(t, h, http.MethodGet, "/api/collections/"+itoa(e.Recording.CollectionID)+"/export", nil)

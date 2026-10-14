@@ -6,7 +6,8 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/match"
 	"github.com/local/llm-replay-proxy/internal/model"
 	"github.com/local/llm-replay-proxy/internal/protocol"
@@ -59,6 +61,15 @@ type handler struct {
 	defaultProvider string
 	client          *http.Client
 	clock           Clock
+	// flights holds the identical requests currently forwarded in auto mode,
+	// by collection and key. Each channel closes when its request finishes.
+	flightsMu sync.Mutex
+	flights   map[flightKey]chan struct{}
+}
+
+type flightKey struct {
+	collectionID int64
+	key          string
 }
 
 type realClock struct{}
@@ -98,7 +109,7 @@ func New(db *store.Store, cfg Config) http.Handler {
 			providers[name][route] = normalizeUpstream(upstream)
 		}
 	}
-	return &handler{db: db, providers: providers, defaultProvider: cfg.DefaultProvider, client: &clientCopy, clock: clock}
+	return &handler{db: db, providers: providers, defaultProvider: cfg.DefaultProvider, client: &clientCopy, clock: clock, flights: map[flightKey]chan struct{}{}}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -128,15 +139,14 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 413, "request_too_large", "request body exceeds 64 MiB")
 		return
 	}
-	var request map[string]any
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	if err := dec.Decode(&request); err != nil || request == nil {
-		writeError(w, 400, "invalid_json", "request body must be a JSON object")
+	value, err := jsontree.Decode(body)
+	if err != nil {
+		writeError(w, 400, "invalid_json", "request body must contain exactly one JSON object")
 		return
 	}
-	if err := ensureJSONEOF(dec); err != nil {
-		writeError(w, 400, "invalid_json", "request body must contain exactly one JSON object")
+	request, ok := value.(map[string]any)
+	if !ok {
+		writeError(w, 400, "invalid_json", "request body must be a JSON object")
 		return
 	}
 	streaming := false
@@ -174,21 +184,7 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 	if settings.Mode != "record" {
 		entry, lookupErr := h.db.Lookup(r.Context(), collection.ID, key)
 		if lookupErr == nil {
-			started := h.clock.Now()
-			first, replayErr := h.replay(w, r, entry, settings)
-			duration := h.clock.Now().Sub(started).Milliseconds()
-			item := model.History{CollectionID: collection.ID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(body), Outcome: "hit", CacheStatus: "hit", RecordingID: entry.Recording.ID, Source: "replay", DurationMS: &duration, FirstEventMS: first}
-			if replayErr == nil {
-				item.RevisionID = entry.Revision.ID
-			} else {
-				item.Detail = replayErr.Error()
-				if clientGone(r.Context(), replayErr) {
-					item.Outcome = "interrupted"
-				} else {
-					item.Outcome = "error"
-				}
-			}
-			h.addHistory(r.Context(), item)
+			h.serveHit(w, r, entry, settings, collection.ID, provider, key, body, "")
 			return
 		}
 		if !errors.Is(lookupErr, store.ErrNotFound) {
@@ -222,7 +218,86 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if settings.Mode == "auto" {
+		// Identical requests that miss together would each go upstream, get
+		// different answers and each publish a revision, leaving only the last
+		// one active. Callers that continued from the others then miss on
+		// replay. Only the first is forwarded; the rest replay its recording,
+		// exactly as they would have if they had arrived a moment later.
+		release, entry, waited, err := h.joinFlight(r.Context(), collection.ID, key)
+		if err != nil {
+			if clientGone(r.Context(), err) {
+				h.addHistory(r.Context(), model.History{CollectionID: collection.ID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(body), Outcome: "interrupted", CacheStatus: "miss", Source: "proxy", Detail: "caller left while an identical request was in flight: " + err.Error()})
+				return
+			}
+			writeError(w, 500, "storage_error", err.Error())
+			return
+		}
+		if release == nil {
+			h.serveHit(w, r, entry, settings, collection.ID, provider, key, body, fmt.Sprintf("replayed after waiting %dms for an identical request in flight", waited.Milliseconds()))
+			return
+		}
+		defer release()
+	}
 	h.forward(w, r, body, canonical, key, collection.ID, provider, upstream, streaming, settings.Mode == "auto")
+}
+
+// serveHit replays a recording and logs the call. detail notes how the hit
+// came about when it is not a plain lookup.
+func (h *handler) serveHit(w http.ResponseWriter, r *http.Request, entry model.Entry, settings model.Settings, collectionID int64, provider, key string, body []byte, detail string) {
+	started := h.clock.Now()
+	first, replayErr := h.replay(w, r, entry, settings)
+	duration := h.clock.Now().Sub(started).Milliseconds()
+	item := model.History{CollectionID: collectionID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(body), Outcome: "hit", CacheStatus: "hit", RecordingID: entry.Recording.ID, Source: "replay", Detail: detail, DurationMS: &duration, FirstEventMS: first}
+	if replayErr == nil {
+		item.RevisionID = entry.Revision.ID
+	} else {
+		item.Detail = replayErr.Error()
+		if clientGone(r.Context(), replayErr) {
+			item.Outcome = "interrupted"
+		} else {
+			item.Outcome = "error"
+		}
+	}
+	h.addHistory(r.Context(), item)
+}
+
+// joinFlight makes the caller the one request forwarded for this key, or
+// waits for the identical request already in flight. A leader gets a release
+// function to call once its forward has finished. A follower gets the
+// recording the leader published instead; when the leader failed to publish
+// one, the follower takes over as leader.
+func (h *handler) joinFlight(ctx context.Context, collectionID int64, key string) (release func(), entry model.Entry, waited time.Duration, err error) {
+	id := flightKey{collectionID, key}
+	started := h.clock.Now()
+	for {
+		h.flightsMu.Lock()
+		done, busy := h.flights[id]
+		if !busy {
+			done = make(chan struct{})
+			h.flights[id] = done
+			h.flightsMu.Unlock()
+			return func() {
+				h.flightsMu.Lock()
+				delete(h.flights, id)
+				h.flightsMu.Unlock()
+				close(done)
+			}, model.Entry{}, 0, nil
+		}
+		h.flightsMu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, model.Entry{}, 0, ctx.Err()
+		}
+		entry, err := h.db.Lookup(ctx, collectionID, key)
+		if err == nil {
+			return nil, entry, h.clock.Now().Sub(started), nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, model.Entry{}, 0, err
+		}
+	}
 }
 
 // selectProvider resolves the provider named by ProviderHeader, else the
@@ -265,6 +340,7 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 	}
 	flusher, _ := w.(http.Flusher)
 	previous := int64(0)
+	multiplier, skipBefore := pacing(entry, s)
 	for i, event := range entry.Revision.Events {
 		if err := r.Context().Err(); err != nil {
 			return first, err
@@ -272,12 +348,12 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 		delay := time.Duration(0)
 		if i == 0 {
 			delay = time.Duration(s.FirstEventDelayMS) * time.Millisecond
-		} else {
-			delta := event.OffsetMS - previous
+		} else if event.OffsetMS > skipBefore {
+			delta := event.OffsetMS - max(previous, skipBefore)
 			if delta < 0 {
 				delta = 0
 			}
-			delay = scaledDelay(delta, s.DelayMultiplier)
+			delay = scaledDelay(delta, multiplier)
 		}
 		if err := h.clock.Sleep(r.Context(), delay); err != nil {
 			return first, err
@@ -289,7 +365,7 @@ func (h *handler) replay(w http.ResponseWriter, r *http.Request, entry model.Ent
 			flusher.Flush()
 		}
 		previous = event.OffsetMS
-		if first == nil && hasSSEData(event.Data) {
+		if first == nil && protocol.HasSSEData(event.Data) {
 			v := h.clock.Now().Sub(started).Milliseconds()
 			first = &v
 		}
@@ -308,29 +384,32 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		}
 		h.addHistory(r.Context(), model.History{CollectionID: collectionID, Route: r.URL.Path, Provider: provider, Key: key, Request: clone(original), Outcome: outcome, Detail: detail, RecordingID: recordingID, RevisionID: revisionID, Source: "upstream", CacheStatus: cacheStatus, DurationMS: &duration, FirstEventMS: firstEvent})
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.URL, bytes.NewReader(original))
-	if err != nil {
-		writeError(w, 500, "upstream_request_error", err.Error())
-		return
+	send := func() (*http.Response, error) {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.URL, bytes.NewReader(original))
+		if err != nil {
+			return nil, err
+		}
+		// A nil GetBody prevents net/http's transport from automatically replaying
+		// this POST after a connection failure, including when idempotency headers
+		// are configured upstream. The only replay is the explicit one below,
+		// before the caller has received any event.
+		req.GetBody = nil
+		// The inference endpoints accept JSON and this fixed value is part of the
+		// proxy's forwarding contract, so caller headers cannot silently change
+		// matching semantics.
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range upstream.Headers {
+			req.Header.Set(k, v)
+		}
+		// Content-Encoding is not forwarded, so the body must reach the caller and
+		// the recording decoded. Leaving Accept-Encoding to the transport keeps its
+		// transparent gzip decompression enabled; a configured value would disable it.
+		req.Header.Del("Accept-Encoding")
+		setCredential(req.Header, r.URL.Path, upstream.APIKey)
+		return h.client.Do(req)
 	}
-	// A nil GetBody prevents net/http's transport from automatically replaying
-	// this POST after a connection failure, including when idempotency headers
-	// are configured upstream.
-	req.GetBody = nil
-	// The inference endpoints accept JSON and this fixed value is part of the
-	// proxy's forwarding contract, so caller headers cannot silently change
-	// matching semantics.
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range upstream.Headers {
-		req.Header.Set(k, v)
-	}
-	// Content-Encoding is not forwarded, so the body must reach the caller and
-	// the recording decoded. Leaving Accept-Encoding to the transport keeps its
-	// transparent gzip decompression enabled; a configured value would disable it.
-	req.Header.Del("Accept-Encoding")
-	setCredential(req.Header, r.URL.Path, upstream.APIKey)
 	started := h.clock.Now()
-	resp, err := h.client.Do(req)
+	resp, err := send()
 	if err != nil {
 		if clientGone(r.Context(), err) {
 			history("interrupted", err.Error(), 0, 0)
@@ -340,14 +419,18 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
-	defer resp.Body.Close()
 	body, err := decodedBody(resp)
 	if err != nil {
+		resp.Body.Close()
 		history("error", err.Error(), 0, 0)
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
-	defer body.Close()
+	// A retried stream swaps both, so the deferred close reads them late.
+	defer func() {
+		body.Close()
+		resp.Body.Close()
+	}()
 	headers := allowedHeaders(resp.Header)
 	copyResponseHeaders(w.Header(), headers)
 	w.WriteHeader(resp.StatusCode)
@@ -359,12 +442,19 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	// incompleteAtHangup explains why a stream the caller abandoned was not
 	// complete, since the cancellation error alone does not say.
 	var incompleteAtHangup error
+	// upstreamErr is a failure reading the upstream body (a dropped connection
+	// or reset stream), as opposed to the caller going away or the body ending
+	// in a shape the proxy rejects. The caller must see it as a failed
+	// connection rather than a clean end of a truncated response.
+	var upstreamErr error
+	// retried lists the upstream failures recovered from by sending again.
+	var retried []string
 	if streaming {
 		parser := newSSEParser()
 		var captured int64
 		captureOverflow := false
 		buf := make([]byte, 32*1024)
-		for {
+		for attempt := 1; ; {
 			n, err := body.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
@@ -381,7 +471,7 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 					flusher.Flush()
 				}
 				for _, frame := range parser.Push(chunk) {
-					if firstEvent == nil && hasSSEData(frame) {
+					if firstEvent == nil && protocol.HasSSEData(frame) {
 						v := h.clock.Now().Sub(requestStarted).Milliseconds()
 						firstEvent = &v
 					}
@@ -397,6 +487,38 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 			if err != nil {
 				if !errors.Is(err, io.EOF) {
 					readErr = err
+					if !clientGone(r.Context(), err) {
+						upstreamErr = err
+					}
+				}
+				// Until the first data frame the caller has only received
+				// headers and whole keep-alive comments, so a fresh upstream
+				// stream can continue the same response unnoticed. After that,
+				// sending again could deliver a second, different answer.
+				if upstreamErr != nil && success && firstEvent == nil && !parser.Pending() && attempt < maxUpstreamAttempts {
+					retried = append(retried, upstreamErr.Error())
+					attempt++
+					next, nextBody, retryErr := h.retryStream(r.Context(), send, attempt)
+					if retryErr != nil {
+						readErr = fmt.Errorf("retry %d after %w: %w", attempt-1, upstreamErr, retryErr)
+						if !clientGone(r.Context(), retryErr) {
+							upstreamErr = readErr
+						} else {
+							upstreamErr = nil
+						}
+						break
+					}
+					body.Close()
+					resp.Body.Close()
+					resp, body = next, nextBody
+					readErr, upstreamErr = nil, nil
+					// The recording holds the stream that succeeded, timed from
+					// its own request.
+					started = h.clock.Now()
+					revision.Headers = allowedHeaders(resp.Header)
+					revision.Events = nil
+					captured, captureOverflow = 0, false
+					continue
 				}
 				break
 			}
@@ -434,6 +556,9 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		responseBody := &limitedCapture{limit: maxRecordedResponseBytes}
 		writer := io.MultiWriter(w, responseBody)
 		_, readErr = copyToClient(writer, body)
+		if readErr != nil && !clientGone(r.Context(), readErr) {
+			upstreamErr = readErr
+		}
 		if responseBody.overflow {
 			readErr = errors.New("upstream response exceeds recording limit")
 		}
@@ -456,11 +581,19 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		if clientGone(r.Context(), readErr) {
 			outcome = "interrupted"
 		}
-		history(outcome, strings.Join(details, ": "), 0, 0)
+		history(outcome, withRetries(strings.Join(details, ": "), retried), 0, 0)
+		// The status line is already sent, so the only honest signal left for a
+		// truncated response is a broken connection: a clean end would pass
+		// it off as the whole response. A response that is complete despite
+		// the trailing transport error still reaches the caller intact, though
+		// it is not published.
+		if upstreamErr != nil && protocol.Validate(r.URL.Path, streaming, revision) != nil {
+			panic(http.ErrAbortHandler)
+		}
 		return
 	}
 	if err := protocol.Validate(r.URL.Path, streaming, revision); err != nil {
-		history("incomplete", err.Error(), 0, 0)
+		history("incomplete", withRetries(err.Error(), retried), 0, 0)
 		return
 	}
 	publishCtx := r.Context()
@@ -489,7 +622,51 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 	if streaming && (hungUpAfterCompletion || r.Context().Err() != nil) {
 		detail = "caller disconnected after the complete stream"
 	}
-	history("recorded", detail, entry.Recording.ID, entry.Revision.ID)
+	history("recorded", withRetries(detail, retried), entry.Recording.ID, entry.Revision.ID)
+}
+
+// maxUpstreamAttempts bounds how often a stream that failed before its first
+// data frame is sent upstream, counting the original request.
+const maxUpstreamAttempts = 3
+
+// retryBackoff is the pause before each repeated upstream request.
+const retryBackoff = 500 * time.Millisecond
+
+// retryStream sends the request again after a stream failed before its first
+// data frame. The caller already has the original status line, so only a
+// successful event stream can continue the response.
+func (h *handler) retryStream(ctx context.Context, send func() (*http.Response, error), attempt int) (*http.Response, io.ReadCloser, error) {
+	if err := h.clock.Sleep(ctx, time.Duration(attempt-1)*retryBackoff); err != nil {
+		return nil, nil, err
+	}
+	resp, err := send()
+	if err != nil {
+		return nil, nil, err
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		resp.Body.Close()
+		return nil, nil, fmt.Errorf("upstream answered the retry with %s %s", resp.Status, resp.Header.Get("Content-Type"))
+	}
+	body, err := decodedBody(resp)
+	if err != nil {
+		resp.Body.Close()
+		return nil, nil, err
+	}
+	return resp, body, nil
+}
+
+// withRetries prefixes a history detail with the upstream failures that were
+// recovered from by sending the request again.
+func withRetries(detail string, retried []string) string {
+	if len(retried) == 0 {
+		return detail
+	}
+	note := fmt.Sprintf("retried upstream after %d failure(s) before the first event: %s", len(retried), strings.Join(retried, "; "))
+	if detail == "" {
+		return note
+	}
+	return note + "; " + detail
 }
 
 // streamPublishTimeout bounds publication of a complete stream, which no
@@ -561,15 +738,6 @@ func decodedBody(resp *http.Response) (io.ReadCloser, error) {
 	}
 }
 
-func hasSSEData(frame string) bool {
-	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
-		if line == "data" || strings.HasPrefix(line, "data:") {
-			return true
-		}
-	}
-	return false
-}
-
 func (h *handler) recordedStateReference(ctx context.Context, collectionID int64, body []byte) (bool, string, error) {
 	refs, err := match.StateReferences(body)
 	if err != nil {
@@ -631,18 +799,7 @@ func copyResponseHeaders(dst http.Header, src map[string]string) {
 		dst.Set(k, v)
 	}
 }
-func clone(value []byte) json.RawMessage { return append(json.RawMessage(nil), value...) }
-func ensureJSONEOF(dec *json.Decoder) error {
-	var extra any
-	err := dec.Decode(&extra)
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err == nil {
-		return errors.New("extra JSON value")
-	}
-	return err
-}
+func clone(value []byte) jsontext.Value { return jsontext.Value(value).Clone() }
 
 type limitedCapture struct {
 	buf      bytes.Buffer
@@ -692,6 +849,29 @@ func normalizeUpstream(u Upstream) Upstream {
 	return u
 }
 
+// pacing returns the multiplier for a replayed stream's gaps and the offset
+// before which gaps are skipped. With multiplier pacing that is the setting
+// itself. With tokens-per-second pacing the keep-alive gaps before the first
+// data frame are skipped (first_event_delay_ms stands in for them) and the
+// rest are scaled so the recording's output tokens stream at the target
+// rate; a recording without a known output token count keeps its recorded
+// cadence after its first data frame.
+func pacing(entry model.Entry, s model.Settings) (multiplier float64, skipBefore int64) {
+	if s.Pacing != model.PacingTokensPerSecond {
+		return s.DelayMultiplier, 0
+	}
+	start, span, ok := protocol.Generation(entry.Revision.Events)
+	if !ok {
+		return 1, 0
+	}
+	summary := protocol.SummarizeResponse(entry.Recording.Route, true, entry.Revision)
+	recorded := protocol.TokensPerSecond(summary.Usage.Output, span)
+	if recorded == nil || s.TargetTokensPerSecond <= 0 {
+		return 1, start
+	}
+	return *recorded / s.TargetTokensPerSecond, start
+}
+
 func scaledDelay(deltaMS int64, multiplier float64) time.Duration {
 	if deltaMS <= 0 || multiplier <= 0 {
 		return 0
@@ -706,7 +886,7 @@ func scaledDelay(deltaMS int64, multiplier float64) time.Duration {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": message}})
+	_ = json.MarshalWrite(w, map[string]any{"error": map[string]string{"code": code, "message": message}}, jsontree.Stable...)
 }
 
 // sseParser recognizes both LF and CRLF event delimiters while retaining bytes.

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/local/llm-replay-proxy/internal/model"
@@ -22,8 +23,16 @@ var ErrActiveCollection = errors.New("store: collection is active")
 // Recordings lists a collection, newest first, with each active request
 // summarized and replay hits counted from history. No request bytes are read
 // unless a summary has not been computed yet.
-func (s *Store) Recordings(ctx context.Context, cid int64) ([]model.RecordingSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.collection_id,r.key,r.route,r.streaming,r.active_revision_id,r.created_at,
+func (s *Store) Recordings(ctx context.Context, cid int64) (out []model.RecordingSummary, err error) {
+	err = s.readTx(ctx, func(q querier) error {
+		out, err = s.recordings(ctx, q, cid)
+		return err
+	})
+	return out, err
+}
+
+func (s *Store) recordings(ctx context.Context, q querier, cid int64) ([]model.RecordingSummary, error) {
+	rows, err := q.QueryContext(ctx, `SELECT r.id,r.collection_id,r.key,r.route,r.streaming,r.active_revision_id,r.created_at,
  v.request_body,coalesce(v.created_at,''),coalesce(v.source,''),(SELECT count(*) FROM revisions x WHERE x.recording_id=r.id)
 FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.collection_id=? ORDER BY r.id DESC`, cid)
 	if err != nil {
@@ -52,7 +61,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 			need[body.Int64] = out[i].Route
 		}
 	}
-	sums, err := s.requestSummaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, q, need, false)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +71,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 			revisions[out[i].ActiveRevisionID] = true
 		}
 	}
-	responses, err := s.responseSummaries(ctx, revisions)
+	responses, err := s.responseSummaries(ctx, q, revisions)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +81,7 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 		out[i].Response = responses[out[i].ActiveRevisionID]
 		index[out[i].ID] = i
 	}
-	rows, err = s.db.QueryContext(ctx, "SELECT recording_id,count(*),max(created_at) FROM history WHERE collection_id=? AND outcome='hit' AND recording_id<>0 GROUP BY recording_id", cid)
+	rows, err = q.QueryContext(ctx, "SELECT recording_id,count(*),max(created_at) FROM history WHERE collection_id=? AND outcome='hit' AND recording_id<>0 GROUP BY recording_id", cid)
 	if err != nil {
 		return nil, err
 	}
@@ -90,10 +99,12 @@ FROM recordings r LEFT JOIN revisions v ON v.id=r.active_revision_id WHERE r.col
 	return out, rows.Err()
 }
 
-const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,provider"
+const historyCols = "id,collection_id,route,key,request_body,outcome,detail,recording_id,created_at,source,duration_ms,first_event_ms,lookup_outcome,provider,revision_id"
 
 func scanHistory(row interface{ Scan(...any) error }) (h model.History, body sql.NullInt64, err error) {
-	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus, &h.Provider)
+	var revision sql.NullInt64
+	err = row.Scan(&h.ID, &h.CollectionID, &h.Route, &h.Key, &body, &h.Outcome, &h.Detail, &h.RecordingID, &h.CreatedAt, &h.Source, &h.DurationMS, &h.FirstEventMS, &h.CacheStatus, &h.Provider, &revision)
+	h.RevisionID = revision.Int64
 	return
 }
 
@@ -106,6 +117,19 @@ func (s *Store) History(ctx context.Context, cid int64, limit int) ([]model.Hist
 // fetch only what it has not seen. History rows never change once written.
 // A non-empty provider keeps only the calls that selected that provider.
 func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int, provider string) ([]model.History, error) {
+	return s.historyBetween(ctx, cid, afterID, 0, limit, provider, nil)
+}
+
+// HistoryBefore lists calls older than beforeID, newest first, so a reader can
+// page back through history; beforeID 0 starts from the newest call. Non-empty
+// outcomes keep only calls with one of those outcomes.
+func (s *Store) HistoryBefore(ctx context.Context, cid, beforeID int64, limit int, provider string, outcomes []string) ([]model.History, error) {
+	return s.historyBetween(ctx, cid, 0, beforeID, limit, provider, outcomes)
+}
+
+// historyBetween lists calls with afterID < id < beforeID (no upper bound when
+// beforeID is 0), newest first.
+func (s *Store) historyBetween(ctx context.Context, cid, afterID, beforeID int64, limit int, provider string, outcomes []string) ([]model.History, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -116,7 +140,25 @@ func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int,
 	if provider == "unknown" {
 		value = "" // rows without a provider, as Insights names them
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+historyCols+" FROM history WHERE collection_id=? AND id>? AND (NOT ? OR provider=?) ORDER BY id DESC LIMIT ?", cid, afterID, filtered, value, limit)
+	query := "SELECT " + historyCols + " FROM history WHERE collection_id=? AND id>? AND (?=0 OR id<?) AND (NOT ? OR provider=?)"
+	args := []any{cid, afterID, beforeID, beforeID, filtered, value}
+	if len(outcomes) > 0 {
+		query += " AND outcome IN (?" + strings.Repeat(",?", len(outcomes)-1) + ")"
+		for _, o := range outcomes {
+			args = append(args, o)
+		}
+	}
+	var out []model.History
+	err := s.readTx(ctx, func(q querier) (err error) {
+		out, err = s.historyIn(ctx, q, query+" ORDER BY id DESC LIMIT ?", append(args, limit)...)
+		return err
+	})
+	return out, err
+}
+
+// historyIn reads history rows with their requests summarized.
+func (s *Store) historyIn(ctx context.Context, q querier, query string, args ...any) ([]model.History, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +182,7 @@ func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int,
 			need[body.Int64] = out[i].Route
 		}
 	}
-	sums, err := s.requestSummaries(ctx, need)
+	sums, err := s.requestSummaries(ctx, q, need, false)
 	if err != nil {
 		return nil, err
 	}
@@ -154,18 +196,24 @@ func (s *Store) HistoryAfter(ctx context.Context, cid, afterID int64, limit int,
 
 // HistoryItem returns one call with its exact request bytes and summary.
 func (s *Store) HistoryItem(ctx context.Context, id int64) (model.History, error) {
-	h, body, err := scanHistory(s.db.QueryRowContext(ctx, "SELECT "+historyCols+" FROM history WHERE id=?", id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return h, ErrNotFound
-	}
-	if err != nil {
-		return h, err
-	}
-	if h.Request, err = (bodyCache{}).load(ctx, s.db, body); err != nil || !body.Valid {
-		return h, err
-	}
-	sums, err := s.requestSummaries(ctx, map[int64]string{body.Int64: h.Route})
-	h.Summary = sums[body.Int64]
+	var h model.History
+	err := s.readTx(ctx, func(q querier) error {
+		var body sql.NullInt64
+		var err error
+		h, body, err = scanHistory(q.QueryRowContext(ctx, "SELECT "+historyCols+" FROM history WHERE id=?", id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if h.Request, err = (bodyCache{}).load(ctx, q, body); err != nil || !body.Valid {
+			return err
+		}
+		sums, err := s.requestSummaries(ctx, q, map[int64]string{body.Int64: h.Route}, false)
+		h.Summary = sums[body.Int64]
+		return err
+	})
 	return h, err
 }
 

@@ -3,10 +3,10 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -16,8 +16,8 @@ const previewRunes = 160
 // cannot recognise stay empty; it never fails.
 func SummarizeRequest(route string, body []byte) model.RequestSummary {
 	s := model.RequestSummary{Bytes: int64(len(body))}
-	var req map[string]any
-	if json.Unmarshal(body, &req) != nil {
+	req, err := jsontree.Object(body, jsontree.Lenient...)
+	if err != nil {
 		return s
 	}
 	s.Model, _ = req["model"].(string)
@@ -56,7 +56,7 @@ func SummarizeRequest(route string, body []byte) model.RequestSummary {
 	if firstUser >= 0 {
 		// Every later turn re-sends this opening unchanged, so its hash
 		// groups a conversation's requests.
-		b, _ := json.Marshal(append(opening, items[:firstUser+1]...))
+		b, _ := jsontree.Marshal(append(opening, items[:firstUser+1]...))
 		sum := sha256.Sum256(b)
 		s.Thread = hex.EncodeToString(sum[:8])
 	}

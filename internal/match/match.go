@@ -2,19 +2,20 @@
 package match
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/local/llm-replay-proxy/internal/jsontree"
 )
 
-const canonicalVersion = 2
+const canonicalVersion = 3
 
 // API names the inference API a route speaks. It is the only part of the
 // request outside the body that matching uses: the upstream provider, its URL
@@ -51,18 +52,18 @@ func Key(route string, body []byte, exclusions []string) (string, []byte, error)
 	if _, ok := value.(map[string]any); !ok {
 		return "", nil, errors.New("match: request body must be a JSON object")
 	}
-	value = applyExclusions(value, exclusions)
-	canonicalBody, err := json.Marshal(value)
+	value = normalize(api, applyExclusions(value, exclusions))
+	canonicalBody, err := encode(value)
 	if err != nil {
 		return "", nil, fmt.Errorf("match: canonicalize body: %w", err)
 	}
 
-	// A struct fixes the envelope's field order. RawMessage embeds the already
-	// canonical request rather than quoting it.
+	// A struct fixes the envelope's field order. jsontext.Value embeds the
+	// already canonical request rather than quoting it.
 	input, err := json.Marshal(struct {
-		Version int             `json:"version"`
-		API     string          `json:"api"`
-		Body    json.RawMessage `json:"body"`
+		Version int            `json:"version"`
+		API     string         `json:"api"`
+		Body    jsontext.Value `json:"body"`
 	}{canonicalVersion, api, canonicalBody})
 	if err != nil {
 		return "", nil, fmt.Errorf("match: encode matching input: %w", err)
@@ -160,137 +161,27 @@ func StateReferences(body []byte) ([]string, error) {
 	return refs, nil
 }
 
-func decode(body []byte) (any, error) {
-	if !utf8.Valid(body) {
-		return nil, errors.New("invalid UTF-8")
-	}
-	if err := validateSurrogates(body); err != nil {
-		return nil, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	value, err := decodeValue(decoder)
+// decode parses a request strictly: invalid UTF-8, unpaired surrogate escapes
+// and duplicate object names are rejected, so distinct wire inputs cannot
+// silently share a key. Numbers keep their exact lexeme.
+func decode(body []byte) (any, error) { return jsontree.Decode(body) }
+
+// canonicalOptions format JSON as RFC 8785 (JCS) does, sorted object names,
+// minimal string escapes and no whitespace, except that numbers keep their
+// exact lexeme instead of being rounded through float64.
+var canonicalOptions = []jsontext.Options{jsontext.CanonicalizeRawInts(false), jsontext.CanonicalizeRawFloats(false)}
+
+// encode writes a decoded tree as canonical JSON.
+func encode(value any) (jsontext.Value, error) {
+	b, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := decoder.Token(); err == nil {
-		return nil, errors.New("multiple JSON values")
-	} else if !errors.Is(err, io.EOF) {
+	out := jsontext.Value(b)
+	if err := out.Canonicalize(canonicalOptions...); err != nil {
 		return nil, err
 	}
-	return value, nil
-}
-
-func decodeValue(decoder *json.Decoder) (any, error) {
-	token, err := decoder.Token()
-	if err != nil {
-		return nil, err
-	}
-	delim, compound := token.(json.Delim)
-	if !compound {
-		return token, nil
-	}
-	switch delim {
-	case '{':
-		object := map[string]any{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return nil, err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return nil, errors.New("object key is not a string")
-			}
-			if _, duplicate := object[key]; duplicate {
-				return nil, fmt.Errorf("duplicate object key %q", key)
-			}
-			value, err := decodeValue(decoder)
-			if err != nil {
-				return nil, err
-			}
-			object[key] = value
-		}
-		if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
-			if err != nil {
-				return nil, err
-			}
-			return nil, errors.New("unterminated object")
-		}
-		return object, nil
-	case '[':
-		// A non-nil slice keeps an empty array distinct from null when the
-		// canonical body is re-encoded.
-		array := []any{}
-		for decoder.More() {
-			value, err := decodeValue(decoder)
-			if err != nil {
-				return nil, err
-			}
-			array = append(array, value)
-		}
-		if end, err := decoder.Token(); err != nil || end != json.Delim(']') {
-			if err != nil {
-				return nil, err
-			}
-			return nil, errors.New("unterminated array")
-		}
-		return array, nil
-	default:
-		return nil, fmt.Errorf("unexpected delimiter %q", delim)
-	}
-}
-
-// encoding/json replaces lone UTF-16 surrogate escapes with U+FFFD. Rejecting
-// them prevents distinct wire inputs from silently acquiring the same key.
-func validateSurrogates(body []byte) error {
-	for i := 0; i < len(body); i++ {
-		if body[i] != '"' {
-			continue
-		}
-		for i++; i < len(body) && body[i] != '"'; i++ {
-			if body[i] != '\\' {
-				continue
-			}
-			i++
-			if i >= len(body) {
-				return errors.New("unterminated string escape")
-			}
-			if body[i] != 'u' {
-				continue
-			}
-			code, next, err := unicodeEscape(body, i)
-			if err != nil {
-				return err
-			}
-			i = next
-			if code >= 0xdc00 && code <= 0xdfff {
-				return errors.New("unpaired low surrogate")
-			}
-			if code >= 0xd800 && code <= 0xdbff {
-				if i+2 >= len(body) || body[i+1] != '\\' || body[i+2] != 'u' {
-					return errors.New("unpaired high surrogate")
-				}
-				low, lowNext, err := unicodeEscape(body, i+2)
-				if err != nil || low < 0xdc00 || low > 0xdfff {
-					return errors.New("unpaired high surrogate")
-				}
-				i = lowNext
-			}
-		}
-	}
-	return nil
-}
-
-func unicodeEscape(body []byte, u int) (uint64, int, error) {
-	if u+4 >= len(body) {
-		return 0, u, errors.New("short Unicode escape")
-	}
-	code, err := strconv.ParseUint(string(body[u+1:u+5]), 16, 16)
-	if err != nil {
-		return 0, u, errors.New("invalid Unicode escape")
-	}
-	return code, u + 4, nil
+	return out, nil
 }
 
 // Excluded reports whether the JSON Pointer path names a value that one of the

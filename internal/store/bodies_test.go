@@ -5,7 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -88,7 +88,7 @@ func growingConversation(turns int) [][]byte {
 			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": words(300)}}},
 		)
 		request["input"] = input
-		b, err := json.Marshal(request)
+		b, err := json.Marshal(request, json.Deterministic(true))
 		if err != nil {
 			panic(err)
 		}

@@ -173,6 +173,15 @@ test("thread filters and sorting", () => {
     sortThreads([b, a], "longest").map((t) => t.thread),
     ["b", "a"],
   );
+  const priced = (id, upstream_cost) =>
+    thread({ thread: id, upstream_cost, saved_cost: null });
+  assert.deepEqual(
+    sortThreads(
+      [priced("none", null), priced("cheap", 0.01), priced("dear", 2)],
+      "cost",
+    ).map((t) => t.thread),
+    ["dear", "cheap", "none"],
+  );
   assert.equal(threadFilterFromOutcome("miss"), "misses");
   assert.equal(threadFilterFromOutcome(undefined), "all");
 });

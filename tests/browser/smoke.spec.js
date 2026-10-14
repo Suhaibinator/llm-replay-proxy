@@ -112,6 +112,21 @@ test('control panel completes the record, inspect, edit, compare, restore, expor
   await expect(page.getByLabel('First event delay (ms)')).toHaveValue('0');
   await expect(page.getByLabel('Delay multiplier')).toHaveValue('0');
 
+  // Pacing by a target output speed swaps the multiplier for a speed, and
+  // switching back keeps the multiplier it had.
+  await page.getByLabel('Target output speed').check();
+  await expect(page.getByLabel('Delay multiplier')).toHaveCount(0);
+  await expect(page.getByLabel('Target output tokens per second')).toHaveValue('100');
+  await page.getByLabel('Target output tokens per second').fill('40');
+  await page.getByLabel('Target output tokens per second').blur();
+  await expect(page.getByText('then output at 40 tokens per second')).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Target output speed')).toBeChecked();
+  await expect(page.getByLabel('Target output tokens per second')).toHaveValue('40');
+  await page.getByLabel('Scale recorded gaps').check();
+  await expect(page.getByLabel('Delay multiplier')).toHaveValue('0');
+  await expect(page.getByRole('button', { name: 'Instant playback' })).toBeDisabled();
+
   // A non-active collection can be deleted after an inline confirmation.
   await page.getByRole('button', { name: 'New collection' }).click();
   await page.getByLabel('Name').fill('Disposable');

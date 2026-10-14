@@ -2,7 +2,7 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"slices"
 	"strings"
@@ -58,13 +58,13 @@ func TestDashboardEndpoints(t *testing.T) {
 		t.Fatalf("insights keys %s", got)
 	}
 	totals := raw["totals"].(map[string]any)
-	if got := keys(totals); got != "errors,hit_rate,hits,interrupted,lookup_hits,lookups,misses,recorded,replayed_tokens,requests,saved_cost,threads,upstream_cost,upstream_tokens" {
+	if got := keys(totals); got != "errors,hit_rate,hits,interrupted,lookup_hits,lookups,misses,recorded,replayed_tokens,requests,saved_cost,saved_cost_calls,threads,upstream_cost,upstream_cost_calls,upstream_tokens" {
 		t.Fatalf("totals keys %s", got)
 	}
 	if totals["requests"] != 3.0 || totals["hit_rate"] != 1.0/3 || totals["saved_cost"] != nil || totals["threads"] != 1.0 {
 		t.Fatalf("totals %v", totals)
 	}
-	if got := keys(raw["latency"].(map[string]any)["replay"].(map[string]any)); got != "duration_ms,first_event_histogram,first_event_ms,histogram" {
+	if got := keys(raw["latency"].(map[string]any)["replay"].(map[string]any)); got != "duration_ms,first_event_histogram,first_event_ms,histogram,output_tokens_per_second" {
 		t.Fatalf("latency keys %s", got)
 	}
 	if w = request(t, h, http.MethodGet, "/api/insights?collection_id="+cid+"&model=nope", nil); !strings.Contains(w.Body.String(), `"requests":0`) {
@@ -76,7 +76,7 @@ func TestDashboardEndpoints(t *testing.T) {
 	if w.Code != 200 || len(threads) != 1 {
 		t.Fatalf("threads: %d %s", w.Code, w.Body.String())
 	}
-	if got := keys(threads[0]); got != "errors,first_at,hits,interrupted,last_at,last_outcome,latest,max_items,misses,model,opening,recorded,requests,route,thread,upstream_tokens" {
+	if got := keys(threads[0]); got != "errors,first_at,hits,interrupted,last_at,last_outcome,latest,max_items,misses,model,opening,recorded,requests,route,saved_cost,thread,upstream_cost,upstream_tokens" {
 		t.Fatalf("thread keys %s", got)
 	}
 	if threads[0]["opening"] != "old" || threads[0]["latest"] != "newer" || threads[0]["max_items"] != 3.0 {
@@ -96,7 +96,7 @@ func TestDashboardEndpoints(t *testing.T) {
 	if turn["route"] != "/v1/chat/completions" || turn["source"] != "upstream" {
 		t.Fatalf("turn route/source %v", turn)
 	}
-	if got := keys(turn["response"].(map[string]any)); got != "cost,model,outcome,output_chars,reasoning_chars,tool_calls,usage" {
+	if got := keys(turn["response"].(map[string]any)); got != "cost,generation_ms,model,outcome,output_chars,output_tokens_per_second,reasoning_chars,tool_calls,usage" {
 		t.Fatalf("response keys %s", got)
 	}
 
