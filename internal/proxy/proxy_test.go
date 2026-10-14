@@ -274,6 +274,32 @@ func TestReplayNeedsNoUpstreamButForwardingDoes(t *testing.T) {
 	}
 }
 
+func TestReSignedAttachmentURLReplaysTheRecording(t *testing.T) {
+	const route = "/v1/responses"
+	reply := `{"id":"r1","status":"completed","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"a cat"}]}]}`
+	request := func(date, signature string) string {
+		return `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"https://b.s3.amazonaws.com/cat.png?X-Amz-Date=` + date + `&X-Amz-Expires=900&X-Amz-Signature=` + signature + `"}]}]}`
+	}
+	var forwarded []byte
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		forwarded, _ = io.ReadAll(r.Body)
+		return response(reply, "application/json"), nil
+	})}
+	db := openTestStore(t, "record")
+	h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {route: {URL: "https://upstream.invalid"}}}})
+	if w := perform(h, route, request("20261014T120000Z", "aaaa")); w.Code != 200 {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+	// Normalization applies to matching only: the upstream gets the URL as signed.
+	if string(forwarded) != request("20261014T120000Z", "aaaa") {
+		t.Fatalf("forwarded request changed: %s", forwarded)
+	}
+	setMode(t, db, "replay")
+	if w := perform(h, route, request("20261015T093000Z", "bbbb")); w.Code != 200 || w.Body.String() != reply {
+		t.Fatalf("re-signed replay: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestRecordThenReplayAllProtocolsAndTransports(t *testing.T) {
 	tests := []struct {
 		name, route, response string

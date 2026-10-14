@@ -20,7 +20,7 @@ import (
 // made it, so a build that summarizes differently recomputes older ones.
 const (
 	// summaryVersion changes whenever protocol.SummarizeRequest does.
-	summaryVersion = 2
+	summaryVersion = 3
 	// responseSummaryVersion changes whenever protocol.SummarizeResponse does.
 	responseSummaryVersion = 2
 )

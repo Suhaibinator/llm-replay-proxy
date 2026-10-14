@@ -15,7 +15,7 @@ import (
 	"github.com/local/llm-replay-proxy/internal/jsontree"
 )
 
-const canonicalVersion = 3
+const canonicalVersion = 4
 
 // API names the inference API a route speaks. It is the only part of the
 // request outside the body that matching uses: the upstream provider, its URL

@@ -42,6 +42,17 @@ func TestSummarizeRequest(t *testing.T) {
 	}
 }
 
+func TestSummaryThreadSurvivesResignedAttachments(t *testing.T) {
+	turn := func(signature, later string) []byte {
+		return []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"https://b.s3.amazonaws.com/cat.png?X-Amz-Date=` + signature + `&X-Amz-Signature=` + signature + `"}]}` + later + `]}`)
+	}
+	first := SummarizeRequest(ResponsesRoute, turn("1", ""))
+	later := SummarizeRequest(ResponsesRoute, turn("2", `,{"role":"assistant","content":"a cat"},{"role":"user","content":"sure?"}`))
+	if first.Thread == "" || first.Thread != later.Thread || first.Images != 1 {
+		t.Fatalf("threads %q %q, images %d", first.Thread, later.Thread, first.Images)
+	}
+}
+
 func TestSummaryThreadIsSharedByLaterTurns(t *testing.T) {
 	first := SummarizeRequest(ResponsesRoute, []byte(`{"instructions":"x","input":[{"role":"user","content":"hi"}]}`))
 	later := SummarizeRequest(ResponsesRoute, []byte(`{"instructions":"x","input":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"more"}]}`))
