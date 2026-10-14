@@ -1,6 +1,7 @@
 // Pure data shaping and formatting for the Overview analytics view. No React,
 // no DOM: everything here is unit tested in insights.test.mjs.
 import type {
+  Costs,
   InsightBucket,
   Insights,
   LatencyStats,
@@ -221,6 +222,8 @@ const emptyBucket = (start: string): InsightBucket => ({
   errors: 0,
   upstream_tokens: zeroTokens(),
   replayed_tokens: zeroTokens(),
+  upstream_cost: null,
+  saved_cost: null,
 });
 
 /**
@@ -430,6 +433,200 @@ export function tokenSeries(series: InsightBucket[]): TokenRow[] {
       replayedTotal: partsTotal(replayed),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Cost
+
+export type CostPeriod = "hour" | "day" | "week" | "month";
+
+/** Periods a series can be summed into: its own bucket and coarser ones. */
+export const costPeriods = (bucket: "hour" | "day"): CostPeriod[] =>
+  bucket === "hour" ? ["hour", "day"] : ["day", "week", "month"];
+
+export const COST_PERIOD_LABELS: Record<CostPeriod, string> = {
+  hour: "Hour",
+  day: "Day",
+  week: "Week",
+  month: "Month",
+};
+
+/** Start of the UTC period containing t: weeks start on Monday. */
+export function periodStart(t: number, period: CostPeriod) {
+  const d = new Date(t);
+  switch (period) {
+    case "hour":
+      return Math.floor(t / HOUR) * HOUR;
+    case "day":
+      return Math.floor(t / DAY) * DAY;
+    case "week": {
+      const day = Math.floor(t / DAY) * DAY;
+      return day - ((d.getUTCDay() + 6) % 7) * DAY;
+    }
+    case "month":
+      return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  }
+}
+
+function periodEnd(start: number, period: CostPeriod) {
+  if (period === "month") {
+    const d = new Date(start);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  }
+  return start + { hour: HOUR, day: DAY, week: 7 * DAY }[period];
+}
+
+export type CostRow = {
+  start: string;
+  upstream: number;
+  saved: number;
+  /** Some bucket in the period reported a cost. */
+  reported: boolean;
+  /** The period reaches outside the range, so it is not a whole one. */
+  partial: boolean;
+};
+
+/**
+ * Spend and savings per period, oldest first, summed from the series'
+ * buckets. Periods are UTC, like the server's daily buckets.
+ */
+export function costSeries(
+  ins: Pick<Insights, "from" | "to">,
+  series: InsightBucket[],
+  period: CostPeriod,
+): CostRow[] {
+  const from = Date.parse(ins.from),
+    to = Date.parse(ins.to);
+  const byStart = new Map<number, CostRow>();
+  for (const b of series) {
+    const t = Date.parse(b.start);
+    if (Number.isNaN(t)) continue;
+    const start = periodStart(t, period);
+    let row = byStart.get(start);
+    if (!row) {
+      row = {
+        start: new Date(start).toISOString().replace(".000Z", "Z"),
+        upstream: 0,
+        saved: 0,
+        reported: false,
+        partial: start < from || periodEnd(start, period) > to,
+      };
+      byStart.set(start, row);
+    }
+    const up = b.upstream_cost ?? null,
+      saved = b.saved_cost ?? null;
+    row.upstream += up ?? 0;
+    row.saved += saved ?? 0;
+    row.reported ||= up != null || saved != null;
+  }
+  return [...byStart.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]);
+}
+
+const monthFormat = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  timeZone: "UTC",
+});
+const monthTitleFormat = new Intl.DateTimeFormat("en-US", {
+  month: "long",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+/** Axis label for a cost period: "14:00", "Oct 6" (week of), "Oct". */
+export function periodTick(start: string, period: CostPeriod) {
+  if (period === "hour" || period === "day") return bucketTick(start, period);
+  const d = new Date(start);
+  if (Number.isNaN(d.getTime())) return start;
+  return period === "week" ? dayFormat.format(d) : monthFormat.format(d);
+}
+
+/** Tooltip/table label for a cost period. */
+export function periodTitle(
+  row: Pick<CostRow, "start" | "partial">,
+  period: CostPeriod,
+) {
+  const d = new Date(row.start);
+  let title: string;
+  if (period === "hour" || period === "day")
+    title = bucketTitle(row.start, period);
+  else if (Number.isNaN(d.getTime())) title = row.start;
+  else
+    title =
+      period === "week"
+        ? `Week of ${dayTitleFormat.format(d)} (UTC)`
+        : `${monthTitleFormat.format(d)} (UTC)`;
+  return row.partial ? `${title}, partial` : title;
+}
+
+export type CostSummary = {
+  spent: number | null;
+  saved: number | null;
+  /** What upstream would have charged had nothing replayed. */
+  withoutReplay: number | null;
+  /** saved / withoutReplay. */
+  savingsRate: number | null;
+  /** Mean cost of an upstream call that reported one. */
+  perCall: number | null;
+  /** Mean cost a hit avoided, over hits that reported one. */
+  perHit: number | null;
+  /** Spend per day over the range's length. */
+  perDay: number | null;
+  /** perDay over 30 days. */
+  perMonth: number | null;
+  days: number;
+};
+
+export function costSummary(
+  ins: Pick<Insights, "from" | "to" | "totals">,
+): CostSummary {
+  const t = ins.totals;
+  const spent = t.upstream_cost ?? null,
+    saved = t.saved_cost ?? null;
+  const span = Date.parse(ins.to) - Date.parse(ins.from);
+  const days = span > 0 ? span / DAY : 0;
+  const withoutReplay =
+    spent == null && saved == null ? null : (spent ?? 0) + (saved ?? 0);
+  const perDay = spent != null && days > 0 ? spent / days : null;
+  return {
+    spent,
+    saved,
+    withoutReplay,
+    savingsRate: withoutReplay ? (saved ?? 0) / withoutReplay : null,
+    perCall:
+      spent != null && t.upstream_cost_calls > 0
+        ? spent / t.upstream_cost_calls
+        : null,
+    perHit:
+      saved != null && t.saved_cost_calls > 0
+        ? saved / t.saved_cost_calls
+        : null,
+    perDay,
+    perMonth: perDay == null ? null : perDay * 30,
+    days,
+  };
+}
+
+export type CostBreakdownRow = {
+  name: string;
+  upstream: number | null;
+  saved: number | null;
+  total: number;
+};
+
+/** Rows that reported any cost, largest spend plus savings first. */
+export function costBreakdown<T extends Partial<Costs>>(
+  items: T[],
+  name: (item: T) => string,
+): CostBreakdownRow[] {
+  return items
+    .filter((i) => i.upstream_cost != null || i.saved_cost != null)
+    .map((i) => ({
+      name: name(i),
+      upstream: i.upstream_cost ?? null,
+      saved: i.saved_cost ?? null,
+      total: (i.upstream_cost ?? 0) + (i.saved_cost ?? 0),
+    }))
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +901,7 @@ export type Headline = {
     hitRate: (number | null)[];
     replayedTokens: number[];
     upstreamTokens: number[];
+    savedCost: number[];
   };
 };
 
@@ -732,6 +930,7 @@ export function headline(ins: Insights, series = ins.series): Headline {
       hitRate: series.map((b) => hitRate(b)),
       replayedTokens: series.map((b) => tokenTotal(b.replayed_tokens)),
       upstreamTokens: series.map((b) => tokenTotal(b.upstream_tokens)),
+      savedCost: series.map((b) => b.saved_cost ?? 0),
     },
   };
 }

@@ -110,6 +110,11 @@ export function HeadlineStrip({ h }: { h: Headline }) {
             ? `${formatCost(h.upstreamCost ?? 0)} spent upstream`
             : "Cost appears when the provider reports it (e.g. OpenRouter usage.cost)"
         }
+        trend={
+          costKnown && (
+            <Sparkline values={h.trend.savedCost} color="var(--color-hit)" />
+          )
+        }
       />
       <Stat
         label="Upstream latency"

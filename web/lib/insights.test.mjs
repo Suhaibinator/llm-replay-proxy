@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import {
   addTokens,
   cachedShare,
+  costBreakdown,
+  costPeriods,
+  costSeries,
+  costSummary,
   fillSeries,
   formatAgo,
   formatCost,
@@ -18,6 +22,9 @@ import {
   mergeModelOptions,
   modelRows,
   niceScale,
+  periodStart,
+  periodTick,
+  periodTitle,
   rangeWindow,
   reasoningShare,
   routeRows,
@@ -458,4 +465,131 @@ test("relative times", () => {
   assert.equal(formatAgo("2026-10-02T12:00:00Z", now), "2d ago");
   assert.equal(formatAgo("2026-08-01T12:00:00Z", now), "Aug 1");
   assert.equal(formatAgo("nope", now), "—");
+});
+
+const costBucket = (start, upstream_cost, saved_cost) => ({
+  start,
+  upstream_cost,
+  saved_cost,
+});
+
+test("cost periods start on UTC days, Monday weeks and months", () => {
+  const t = Date.parse("2026-10-08T15:30:00Z"); // a Thursday
+  assert.equal(periodStart(t, "hour"), Date.parse("2026-10-08T15:00:00Z"));
+  assert.equal(periodStart(t, "day"), Date.parse("2026-10-08T00:00:00Z"));
+  assert.equal(periodStart(t, "week"), Date.parse("2026-10-05T00:00:00Z"));
+  assert.equal(
+    periodStart(Date.parse("2026-10-11T23:00:00Z"), "week"),
+    Date.parse("2026-10-05T00:00:00Z"),
+    "Sunday belongs to the week that started Monday",
+  );
+  assert.equal(periodStart(t, "month"), Date.parse("2026-10-01T00:00:00Z"));
+  assert.deepEqual(costPeriods("hour"), ["hour", "day"]);
+  assert.deepEqual(costPeriods("day"), ["day", "week", "month"]);
+});
+
+test("cost series sums buckets per period and flags partial ones", () => {
+  const ins = { from: "2026-09-28T00:00:00Z", to: "2026-10-13T12:00:00Z" };
+  const series = [
+    costBucket("2026-09-28T00:00:00Z", 1, 0.5), // Monday
+    costBucket("2026-09-30T00:00:00Z", null, null),
+    costBucket("2026-10-04T00:00:00Z", 0.25, null), // Sunday
+    costBucket("2026-10-05T00:00:00Z", null, 2),
+    costBucket("2026-10-13T00:00:00Z", 0.1, null),
+  ];
+  const weeks = costSeries(ins, series, "week");
+  assert.deepEqual(
+    weeks.map((w) => [w.start, w.upstream, w.saved, w.reported, w.partial]),
+    [
+      ["2026-09-28T00:00:00Z", 1.25, 0.5, true, false],
+      ["2026-10-05T00:00:00Z", 0, 2, true, false],
+      ["2026-10-12T00:00:00Z", 0.1, 0, true, true],
+    ],
+  );
+  const months = costSeries(ins, series, "month");
+  assert.deepEqual(
+    months.map((m) => [m.start, m.upstream, m.saved, m.partial]),
+    [
+      ["2026-09-01T00:00:00Z", 1, 0.5, true],
+      ["2026-10-01T00:00:00Z", 0.35, 2, true],
+    ],
+  );
+  const days = costSeries(ins, series, "day");
+  assert.equal(days.length, 5);
+  assert.equal(days[1].reported, false, "a day without costs is unreported");
+  assert.equal(periodTick(weeks[1].start, "week"), "Oct 5");
+  assert.equal(periodTick(months[1].start, "month"), "Oct");
+  assert.equal(
+    periodTitle(weeks[2], "week"),
+    "Week of Mon, Oct 12 (UTC), partial",
+  );
+  assert.equal(
+    periodTitle(months[0], "month"),
+    "September 2026 (UTC), partial",
+  );
+});
+
+test("cost summary derives averages, savings rate and run rate", () => {
+  const totals = {
+    upstream_cost: 3,
+    saved_cost: 9,
+    upstream_cost_calls: 6,
+    saved_cost_calls: 4,
+  };
+  const c = costSummary({
+    from: "2026-10-01T00:00:00Z",
+    to: "2026-10-07T00:00:00Z",
+    totals,
+  });
+  assert.equal(c.withoutReplay, 12);
+  assert.equal(c.savingsRate, 0.75);
+  assert.equal(c.perCall, 0.5);
+  assert.equal(c.perHit, 2.25);
+  assert.equal(c.days, 6);
+  assert.equal(c.perDay, 0.5);
+  assert.equal(c.perMonth, 15);
+
+  const none = costSummary({
+    from: "2026-10-01T00:00:00Z",
+    to: "2026-10-02T00:00:00Z",
+    totals: { upstream_cost: null, saved_cost: null },
+  });
+  for (const k of [
+    "spent",
+    "saved",
+    "withoutReplay",
+    "savingsRate",
+    "perCall",
+    "perHit",
+    "perDay",
+    "perMonth",
+  ])
+    assert.equal(none[k], null, k);
+
+  const savedOnly = costSummary({
+    from: "2026-10-01T00:00:00Z",
+    to: "2026-10-02T00:00:00Z",
+    totals: { upstream_cost: null, saved_cost: 1, saved_cost_calls: 2 },
+  });
+  assert.equal(savedOnly.savingsRate, 1);
+  assert.equal(savedOnly.perDay, null);
+  assert.equal(savedOnly.perHit, 0.5);
+});
+
+test("cost breakdown keeps priced rows, largest first", () => {
+  const rows = costBreakdown(
+    [
+      { provider: "openai", upstream_cost: null, saved_cost: null },
+      { provider: "openrouter", upstream_cost: 1, saved_cost: 3 },
+      { provider: "anthropic", upstream_cost: 0.5, saved_cost: null },
+    ],
+    (p) => p.provider,
+  );
+  assert.deepEqual(
+    rows.map((r) => [r.name, r.upstream, r.saved, r.total]),
+    [
+      ["openrouter", 1, 3, 4],
+      ["anthropic", 0.5, null, 0.5],
+    ],
+  );
 });

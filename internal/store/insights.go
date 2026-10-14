@@ -244,21 +244,22 @@ func (h hitRate) value() *float64 {
 	return &v
 }
 
-// optionalSum is a cost total that stays null until some row reports one.
+// optionalSum is a cost total that stays null until some row reports one;
+// n counts the rows that did.
 type optionalSum struct {
-	sum      float64
-	reported bool
+	sum float64
+	n   int64
 }
 
 func (o *optionalSum) add(v *float64) {
 	if v != nil {
 		o.sum += *v
-		o.reported = true
+		o.n++
 	}
 }
 
 func (o optionalSum) value() *float64 {
-	if !o.reported {
+	if o.n == 0 {
 		return nil
 	}
 	v := o.sum
@@ -290,8 +291,9 @@ func (t *tokenSet) add(r *historyRow) {
 // threadAgg builds a ThreadSummary from a thread's rows in any order.
 type threadAgg struct {
 	model.ThreadSummary
-	first, last     time.Time
-	firstID, lastID int64
+	first, last             time.Time
+	firstID, lastID         int64
+	upstreamCost, savedCost optionalSum
 }
 
 func before(at time.Time, id int64, than time.Time, thanID int64) bool {
@@ -303,8 +305,14 @@ func before(at time.Time, id int64, than time.Time, thanID int64) bool {
 
 func (a *threadAgg) add(r *historyRow) {
 	a.Count(r.outcome)
-	if r.outcome == "recorded" && r.resp != nil {
-		a.UpstreamTokens.Add(r.resp.Usage)
+	if r.resp != nil {
+		switch r.outcome {
+		case "recorded":
+			a.UpstreamTokens.Add(r.resp.Usage)
+			a.upstreamCost.add(r.resp.Cost)
+		case "hit":
+			a.savedCost.add(r.resp.Cost)
+		}
 	}
 	if r.req != nil && r.req.Items > a.MaxItems {
 		a.MaxItems = r.req.Items
@@ -336,6 +344,9 @@ func groupThreads(rows []historyRow) []*threadAgg {
 			out = append(out, a)
 		}
 		a.add(r)
+	}
+	for _, a := range out {
+		a.UpstreamCost, a.SavedCost = a.upstreamCost.value(), a.savedCost.value()
 	}
 	slices.SortFunc(out, func(x, y *threadAgg) int {
 		if before(x.last, x.lastID, y.last, y.lastID) {
@@ -395,11 +406,13 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	}
 	type routeAgg struct {
 		model.RouteInsight
-		rate hitRate
+		rate   hitRate
+		tokens tokenSet
 	}
 	type providerAgg struct {
 		model.ProviderInsight
-		rate hitRate
+		rate   hitRate
+		tokens tokenSet
 	}
 	type recordingAgg struct {
 		hits    int64
@@ -455,6 +468,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 		}
 		route.Count(r.outcome)
 		route.rate.add(r)
+		route.tokens.add(r)
 		providerName := r.providerName()
 		provider := providers[providerName]
 		if provider == nil {
@@ -463,6 +477,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 		}
 		provider.Count(r.outcome)
 		provider.rate.add(r)
+		provider.tokens.add(r)
 		if r.outcome == "hit" && r.recordingID != 0 {
 			rec := recordings[r.recordingID]
 			if rec == nil {
@@ -482,9 +497,11 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	out.Totals.HitRate, out.Totals.Lookups, out.Totals.LookupHits = rate.value(), rate.den, rate.hits
 	out.Totals.UpstreamTokens, out.Totals.ReplayedTokens = totals.upstream, totals.replayed
 	out.Totals.UpstreamCost, out.Totals.SavedCost = totals.upstreamCost.value(), totals.savedCost.value()
+	out.Totals.UpstreamCostCalls, out.Totals.SavedCostCalls = totals.upstreamCost.n, totals.savedCost.n
 	out.Totals.Threads = int64(len(threads))
 	for _, b := range order {
 		b.UpstreamTokens, b.ReplayedTokens = b.tokens.upstream, b.tokens.replayed
+		b.UpstreamCost, b.SavedCost = b.tokens.upstreamCost.value(), b.tokens.savedCost.value()
 		b.HitRate = b.rate.value()
 		out.Series = append(out.Series, b.InsightBucket)
 	}
@@ -499,6 +516,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	})
 	for _, r := range routes {
 		r.HitRate = r.rate.value()
+		r.UpstreamCost, r.SavedCost = r.tokens.upstreamCost.value(), r.tokens.savedCost.value()
 		out.Routes = append(out.Routes, r.RouteInsight)
 	}
 	slices.SortFunc(out.Routes, func(a, b model.RouteInsight) int {
@@ -506,6 +524,7 @@ func (s *Store) Insights(ctx context.Context, cid int64, from, to time.Time, fil
 	})
 	for _, p := range providers {
 		p.HitRate = p.rate.value()
+		p.UpstreamCost, p.SavedCost = p.tokens.upstreamCost.value(), p.tokens.savedCost.value()
 		out.Providers = append(out.Providers, p.ProviderInsight)
 	}
 	slices.SortFunc(out.Providers, func(a, b model.ProviderInsight) int {

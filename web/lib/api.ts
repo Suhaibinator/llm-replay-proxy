@@ -301,6 +301,10 @@ export type InsightBucket = OutcomeCounts & {
   upstream_tokens: TokenTotals;
   /** Tokens of recorded responses replayed in this bucket (work the cache saved). */
   replayed_tokens: TokenTotals;
+  /** USD of recorded rows' responses; null when none reported a cost. */
+  upstream_cost: number | null;
+  /** USD of hit rows' responses (what replay avoided paying); null likewise. */
+  saved_cost: number | null;
 };
 
 export type ModelInsight = OutcomeCounts & {
@@ -332,18 +336,27 @@ export type Insights = {
     replayed_tokens: TokenTotals;
     upstream_cost: number | null;
     saved_cost: number | null;
+    /** Recorded and hit rows that reported a cost: averages' denominators. */
+    upstream_cost_calls: number;
+    saved_cost_calls: number;
     /** Distinct conversation threads seen in the range. */
     threads: number;
   };
   series: InsightBucket[];
   models: ModelInsight[];
   /** hit_rate: same definition as totals.hit_rate, over the route's rows. */
-  routes: (OutcomeCounts & { route: string; hit_rate: number | null })[];
+  routes: (OutcomeCounts & {
+    route: string;
+    hit_rate: number | null;
+  } & Costs)[];
   /**
    * Per upstream provider; rows without one are "unknown". hit_rate: same
    * definition as totals.hit_rate, over the provider's rows.
    */
-  providers: (OutcomeCounts & { provider: string; hit_rate: number | null })[];
+  providers: (OutcomeCounts & {
+    provider: string;
+    hit_rate: number | null;
+  } & Costs)[];
   latency: { upstream: LatencyStats; replay: LatencyStats };
   top_recordings: {
     recording_id: number;
@@ -356,21 +369,25 @@ export type Insights = {
   top_threads: ThreadSummary[];
 };
 
-export type ThreadSummary = OutcomeCounts & {
-  thread: string;
-  route: string;
-  model: string;
-  /** Start of the first user message. */
-  opening: string;
-  /** Start of the latest user message. */
-  latest: string;
-  /** Largest item count seen: how long the conversation grew. */
-  max_items: number;
-  first_at: string;
-  last_at: string;
-  last_outcome: string;
-  upstream_tokens: TokenTotals;
-};
+/** Upstream spend and replay savings in USD; null when nothing reported one. */
+export type Costs = { upstream_cost: number | null; saved_cost: number | null };
+
+export type ThreadSummary = OutcomeCounts &
+  Costs & {
+    thread: string;
+    route: string;
+    model: string;
+    /** Start of the first user message. */
+    opening: string;
+    /** Start of the latest user message. */
+    latest: string;
+    /** Largest item count seen: how long the conversation grew. */
+    max_items: number;
+    first_at: string;
+    last_at: string;
+    last_outcome: string;
+    upstream_tokens: TokenTotals;
+  };
 
 export type ThreadTurn = {
   history_id: number;

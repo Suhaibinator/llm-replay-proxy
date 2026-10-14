@@ -103,6 +103,42 @@ test("charts are keyboard readable and have a table view", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("cost sums per day, week and month, with averages", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "30d", exact: true }).click();
+  const cost = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Cost", exact: true }),
+  });
+  await expect(cost.getByRole("group", { name: /Cost per day/ })).toBeVisible();
+  await cost.getByRole("button", { name: "Week", exact: true }).click();
+  await expect(
+    cost.getByRole("group", { name: /Cost per week/ }),
+  ).toBeVisible();
+  for (const label of [
+    "Savings rate",
+    "Per upstream call",
+    "30-day projection",
+  ])
+    await expect(cost.getByText(label, { exact: true })).toBeVisible();
+  await expect(cost.getByText("By route", { exact: true })).toBeVisible();
+  await cost.getByRole("button", { name: "Month", exact: true }).click();
+  await cost.getByRole("button", { name: "Table" }).click();
+  await expect(
+    cost.getByRole("columnheader", { name: "Without replay" }),
+  ).toBeVisible();
+  await expect(
+    cost
+      .getByRole("table")
+      .getByText(/\(UTC\)/)
+      .first(),
+  ).toBeVisible();
+});
+
+test("cost explains itself when no provider reports one", async ({ page }) => {
+  await open(page, { noCost: true });
+  await expect(page.getByText("No cost reported")).toBeVisible();
+});
+
 test("fits a phone screen without horizontal scroll", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await open(page);

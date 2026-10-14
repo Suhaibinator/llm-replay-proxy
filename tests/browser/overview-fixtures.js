@@ -166,6 +166,8 @@ function buildInsights({
       ...counts(),
       upstream_tokens: tokens(),
       replayed_tokens: tokens(),
+      upstream_cost: 0,
+      saved_cost: 0,
     };
     series.push(b);
     if (empty) continue;
@@ -204,7 +206,12 @@ function buildInsights({
         b[outcome]++;
         agg.requests++;
         agg[outcome]++;
-        const route = routes.get(m.route) ?? { route: m.route, ...counts() };
+        const route = routes.get(m.route) ?? {
+          route: m.route,
+          ...counts(),
+          upstream_cost: 0,
+          saved_cost: 0,
+        };
         route.requests++;
         route[outcome]++;
         routes.set(m.route, route);
@@ -224,6 +231,8 @@ function buildInsights({
           addInto(b.upstream_tokens, t2);
           addInto(agg.upstream_tokens, t2);
           agg.upstream_cost += cost;
+          b.upstream_cost += cost;
+          route.upstream_cost += cost;
           const d = m.p50 * Math.exp((r() - 0.5) * 1.6) * (r() < 0.05 ? 3 : 1);
           agg.up.push(d);
           agg.upF.push(
@@ -233,6 +242,8 @@ function buildInsights({
           addInto(b.replayed_tokens, t2);
           addInto(agg.replayed_tokens, t2);
           agg.saved_cost += cost;
+          b.saved_cost += cost;
+          route.saved_cost += cost;
           const d = 40 + r() * 160 + (r() < 0.04 ? 600 : 0);
           agg.re.push(d);
           agg.reF.push(2 + r() * 12);
@@ -358,11 +369,25 @@ function buildInsights({
       replayed_tokens: sumTokens("replayed_tokens"),
       upstream_cost: sumCost("upstream_cost"),
       saved_cost: sumCost("saved_cost"),
+      upstream_cost_calls: noCost ? 0 : totals.recorded,
+      saved_cost_calls: noCost ? 0 : totals.hits,
       threads: empty ? 0 : Math.round(totals.requests / 9),
     },
-    series: series.map(withRate),
+    series: series
+      .map((b) => ({
+        ...b,
+        upstream_cost: noCost ? null : Number(b.upstream_cost.toFixed(6)),
+        saved_cost: noCost ? null : Number(b.saved_cost.toFixed(6)),
+      }))
+      .map(withRate),
     models: modelList.map(withRate),
-    routes: [...routes.values()].map(withRate),
+    routes: [...routes.values()]
+      .map((r) => ({
+        ...r,
+        upstream_cost: noCost ? null : Number(r.upstream_cost.toFixed(6)),
+        saved_cost: noCost ? null : Number(r.saved_cost.toFixed(6)),
+      }))
+      .map(withRate),
     providers: empty
       ? []
       : [
@@ -370,6 +395,8 @@ function buildInsights({
             ...totals,
             provider: "openrouter",
             hit_rate: lookups ? totals.hits / lookups : null,
+            upstream_cost: sumCost("upstream_cost"),
+            saved_cost: sumCost("saved_cost"),
           },
         ],
     latency: { upstream: merge("up"), replay: merge("re") },

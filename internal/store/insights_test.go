@@ -141,6 +141,13 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if !floatIs(tot.UpstreamCost, 0.01) || !floatIs(tot.SavedCost, 0.03) {
 		t.Fatalf("costs %v %v", tot.UpstreamCost, tot.SavedCost)
 	}
+	// One recorded and three hit rows reported a cost; a2 and b1 report none.
+	if tot.UpstreamCostCalls != 1 || tot.SavedCostCalls != 3 {
+		t.Fatalf("cost calls %d %d", tot.UpstreamCostCalls, tot.SavedCostCalls)
+	}
+	if s0, s1 := in.Series[0], in.Series[1]; !floatIs(s0.UpstreamCost, 0.01) || !floatIs(s0.SavedCost, 0.03) || s1.UpstreamCost != nil || s1.SavedCost != nil {
+		t.Fatalf("series costs %+v %+v", s0, s1)
+	}
 	if tot.Threads != 3 || in.Bucket != "hour" || len(in.Series) != 3 || in.From != "2026-03-01T10:00:00Z" {
 		t.Fatalf("threads %d bucket %s series %d from %s", tot.Threads, in.Bucket, len(in.Series), in.From)
 	}
@@ -166,6 +173,12 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	if len(in.Routes) != 1 || in.Routes[0].Route != chatRoute || in.Routes[0].Requests != 13 || !floatIs(in.Routes[0].HitRate, 7.0/12) {
 		t.Fatalf("routes %+v", in.Routes)
 	}
+	if !floatIs(in.Routes[0].UpstreamCost, 0.01) || !floatIs(in.Routes[0].SavedCost, 0.03) {
+		t.Fatalf("route costs %+v", in.Routes[0])
+	}
+	if len(in.Providers) != 1 || !floatIs(in.Providers[0].UpstreamCost, 0.01) || !floatIs(in.Providers[0].SavedCost, 0.03) {
+		t.Fatalf("provider costs %+v", in.Providers)
+	}
 	// Replay durations 5, 20, 70, 50, 100000, 2 (one hit has none).
 	replay := in.Latency.Replay
 	counts := make([]int64, len(replay.Histogram))
@@ -184,6 +197,9 @@ func TestInsightsAggregatesOutcomesTokensCostsAndLatency(t *testing.T) {
 	}
 	if len(in.TopThreads) != 3 || in.TopThreads[0].Opening != "hello a" || in.TopThreads[0].Requests != 6 {
 		t.Fatalf("top threads %+v", in.TopThreads)
+	}
+	if top := in.TopThreads[0]; !floatIs(top.UpstreamCost, 0.01) || !floatIs(top.SavedCost, 0.03) || in.TopThreads[1].UpstreamCost != nil {
+		t.Fatalf("thread costs %+v %+v", top, in.TopThreads[1])
 	}
 
 	only, err := s.Insights(ctx, cid, from, to, InsightFilter{Model: "claude-x"})

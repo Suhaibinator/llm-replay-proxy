@@ -30,6 +30,7 @@ import {
 import { HeadlineStrip } from "@/components/analytics/headline";
 import { TrafficPanel } from "@/components/analytics/traffic-panel";
 import { TokensPanel } from "@/components/analytics/tokens-panel";
+import { CostPanel } from "@/components/analytics/cost-panel";
 import { ModelsPanel } from "@/components/analytics/models-panel";
 import { LatencyPanel } from "@/components/analytics/latency-panel";
 import {
@@ -57,7 +58,7 @@ type Loaded = { key: string; data: Insights };
 
 /**
  * The analytics overview: one filter row (range, model) scoping a headline
- * band, traffic and token flow over time, a per-model breakdown, latency, and
+ * band, traffic, token flow and cost over time, a per-model breakdown, latency, and
  * the routes, recordings and conversations that matter most.
  */
 export function OverviewView(props: ViewProps) {
@@ -409,6 +410,7 @@ export function OverviewView(props: ViewProps) {
           />
         </div>
         <TokensPanel insights={data} series={series} />
+        <CostPanel insights={data} series={series} />
         <ModelsPanel
           models={data.models}
           selected={model}
