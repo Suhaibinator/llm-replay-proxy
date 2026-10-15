@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/local/llm-replay-proxy/internal/jsontree"
+	"github.com/local/llm-replay-proxy/internal/match"
 	"github.com/local/llm-replay-proxy/internal/model"
 )
 
@@ -55,7 +56,9 @@ func SummarizeRequest(route string, body []byte) model.RequestSummary {
 	s.Preview = preview(s.Preview)
 	if firstUser >= 0 {
 		// Every later turn re-sends this opening unchanged, so its hash
-		// groups a conversation's requests.
+		// groups a conversation's requests. It is normalized as for
+		// matching, so a re-signed attachment URL stays the same thread.
+		match.Normalize(route, req)
 		b, _ := jsontree.Marshal(append(opening, items[:firstUser+1]...))
 		sum := sha256.Sum256(b)
 		s.Thread = hex.EncodeToString(sum[:8])

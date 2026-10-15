@@ -109,7 +109,7 @@ func TestCanonicalFormIsJCSWithExactNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"version":3,"api":"responses","body":{"a":[1.0,9007199254740993123456789],"z":"<&>é/"}}`
+	want := `{"version":4,"api":"responses","body":{"a":[1.0,9007199254740993123456789],"z":"<&>é/"}}`
 	if string(input) != want {
 		t.Fatalf("matching input\n got %s\nwant %s", input, want)
 	}

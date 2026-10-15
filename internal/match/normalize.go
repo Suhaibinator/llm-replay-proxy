@@ -13,7 +13,10 @@ import (
 //   - JSON embedded in strings (tool-call arguments and tool results) is
 //     re-encoded canonically, so object key order and whitespace inside it
 //     do not matter. A string that is not a JSON object or array is unchanged,
-//     and the value stays a string.
+//     and the value stays a string;
+//   - attachments compare by what they are, not how they were sent: presigned
+//     URLs without their signing parameters and inline data by the digest of
+//     its decoded bytes (see normalizeAttachments).
 //
 // value is modified in place and returned. An unsupported route leaves it
 // unchanged. Exclusions apply to the request as sent, before Normalize.
@@ -33,6 +36,7 @@ func normalize(api string, value any) any {
 	if tools, ok := request["tools"].([]any); ok {
 		sortTools(tools)
 	}
+	normalizeAttachments(api, request)
 	switch api {
 	case "responses":
 		for _, item := range objects(request["input"]) {

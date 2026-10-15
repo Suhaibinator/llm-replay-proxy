@@ -62,7 +62,7 @@ are not RFC 3339 timestamps. Imported names are trimmed, and null exclusions or
 revision headers are stored as empty values. Request history in a
 snapshot is ignored.
 
-The current SQLite storage format is 6 and is intended for fresh deployments.
+The current SQLite storage format is 7 and is intended for fresh deployments.
 Earlier databases and snapshots are rejected; no migration is provided.
 Non-streaming bodies and binary SSE frames retain their exact stored bytes.
 JSON API strings represent Unicode text; malformed UTF-8 bytes retained by the
@@ -136,7 +136,7 @@ with no `response.output_text.delta` event to rewrite.
 
 Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
 exclusions also matches as `[]`. The key is the SHA-256 of the matching input
-`{"version":3,"api":…,"body":…}`, where `api` is `chat_completions`,
+`{"version":4,"api":…,"body":…}`, where `api` is `chat_completions`,
 `responses` or `messages` and `body` is the canonical request after collection
 exclusions. Canonical JSON is RFC 8785 (JCS) via `encoding/json/jsontext`:
 sorted member names, minimal string escapes and no whitespace. Numbers are the
@@ -145,7 +145,19 @@ float64, so `1` and `1.0` differ. Duplicate member names, invalid UTF-8 and
 unpaired surrogate escapes are rejected. Exclusions apply to the request as sent. Then the `tools` array is
 sorted by each tool's canonical JSON, and JSON objects or arrays embedded in
 tool-call argument and tool-result strings are re-encoded canonically (sorted
-keys, no whitespace, exact numbers), still as strings. Other strings are never
+keys, no whitespace, exact numbers), still as strings. Attachment slots in the
+conversation (Chat Completions `messages`, Responses `input`, Messages
+`messages` and `system`), found at any depth by their part's `type`, are
+normalized too: `image_url.url`, `file.file_data` and `input_audio.data`
+(Chat Completions); `input_image.image_url`, `input_file.file_url` and
+`input_file.file_data` (Responses); and `image`/`document` `source.url` and
+`source.data` for `url` and `base64` sources (Messages). In those slots, an
+http(s) URL loses the signing parameters of a recognised scheme (AWS SigV4
+and V2, GCS V4 and V2, Azure SAS, CloudFront, Supabase Storage) when that scheme's
+signature parameter is present, keeping the rest of the query in order and as
+encoded. A base64 `data:` URL becomes `data:<media type>;sha256:<hex>` and bare
+base64 becomes `sha256:<hex>`, the digest of the decoded bytes (whitespace and
+padding ignored); a value that does not decode is kept. Other strings are never
 reinterpreted. The comparison API diffs the requests after the same
 normalization, so tool paths use the sorted order. The upstream provider, URL and headers are not part of it, so a
 recording replays whichever provider a request selects. The input is derived

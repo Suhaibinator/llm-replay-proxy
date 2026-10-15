@@ -146,6 +146,29 @@ func TestGrowingConversationStoresEachTurnOnce(t *testing.T) {
 	}
 }
 
+func TestBase64AttachmentsStoreCompressed(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	image := make([]byte, 512<<10)
+	rand.New(rand.NewSource(2)).Read(image) // incompressible, like a JPEG
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"` + base64.StdEncoding.EncodeToString(image) + `"}}]}]}`)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := internBody(ctx, tx, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Base64 holds 6 bits per byte; entropy coding stores it near the size
+	// of the decoded image.
+	if _, _, stored := storedBytes(t, s); stored > int64(len(image))*21/20 {
+		t.Fatalf("stored %d bytes for a %d-byte image (%d bytes of base64)", stored, len(image), len(body))
+	}
+}
+
 func TestLookupSkipsRequestAndGetDerivesMatchingInput(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
