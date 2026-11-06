@@ -282,6 +282,40 @@ export function resultParts(value: JSONValue | undefined): Part[] {
   return [{ kind: "data", title: "Output", value, raw: value, open: true }];
 }
 
+/** A decision request is its questions (as instructions) and the state they
+ * are asked about (as the user turn), which may hold image_url parts. */
+function decisionTurns(request: JSONObject): Turn[] {
+  const questions = object(request.questions);
+  const state = request.state;
+  return [
+    {
+      role: "instructions",
+      name: "questions",
+      parts: Object.entries(questions).map(([id, raw]): Part => {
+        const type = str(object(raw).type);
+        return {
+          kind: "data",
+          title: type ? `${id} · ${type}` : id,
+          value: raw,
+          raw,
+        };
+      }),
+      raw: questions,
+    },
+    {
+      role: "user",
+      name: "state",
+      parts: contentParts(
+        Array.isArray(state) || typeof state === "string"
+          ? state
+          : state === undefined
+            ? []
+            : [state],
+      ),
+      raw: state ?? null,
+    },
+  ];
+}
 function chatTurns(request: JSONObject): Turn[] {
   return array(request.messages).map((raw): Turn => {
     const message = object(raw),
@@ -487,6 +521,7 @@ function count(parts: Part[], counts: RequestView["counts"]) {
 }
 
 export function protocolName(route: string): string {
+  if (route.endsWith("/decisions")) return "Decisions";
   return route.endsWith("/messages")
     ? "Anthropic Messages"
     : route.endsWith("/responses")
@@ -521,7 +556,9 @@ export function requestView(route: string, raw: string): RequestView {
         ? chatTurns(request)
         : protocol === "Responses"
           ? responsesTurns(request)
-          : messagesTurns(request);
+          : protocol === "Decisions"
+            ? decisionTurns(request)
+            : messagesTurns(request);
     nameResults(view.turns);
     for (const turn of view.turns) count(turn.parts, view.counts);
     view.tools = toolDefinitions(request);
@@ -537,6 +574,7 @@ export function requestView(route: string, raw: string): RequestView {
     "system",
     "tools",
     "functions",
+    ...(protocol === "Decisions" ? ["state", "questions"] : []),
   ];
   view.parameters = Object.fromEntries(
     Object.entries(request).filter(([key]) => !conversation.includes(key)),

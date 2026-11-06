@@ -64,6 +64,7 @@ func TestProviderValidation(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	up["/v1/decisions"] = Upstream{URL: "https://openrouter.ai/api/alpha/decisions"}
 	ok := Config{Listen: "127.0.0.1:8080", Database: "test", DefaultProvider: "open-router_2", Providers: map[string]Provider{"open-router_2": {Upstreams: up}}}
 	if err := ok.Validate(); err != nil {
 		t.Fatal(err)

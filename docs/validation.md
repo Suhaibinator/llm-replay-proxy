@@ -11,7 +11,7 @@ The implementation is checked at three levels:
 
 | Suite | What it exercises |
 | --- | --- |
-| Go unit and HTTP integration tests | Exact matching, exclusion paths, collection isolation, concurrent publication, database reopen, restore, invalid snapshot rollback, all three protocol responses and streams, tool calls, error/incomplete/cancel behavior, and editing validation |
+| Go unit and HTTP integration tests | Exact matching, exclusion paths, collection isolation, concurrent publication, database reopen, restore, invalid snapshot rollback, all three conversational protocol responses and streams, decisions record/replay and validation, tool calls, error/incomplete/cancel behavior, and editing validation |
 | Injected replay-clock tests | First-event delay, fractional subsequent delays, event order, flushing, and prompt cancellation |
 | KMS SDK integration | Startup parameter/secret reads, immutable version pins, binding credentials, environment/CLI precedence, sanitized failures, and absence of credentials in exported SQLite |
 | Playwright browser smoke | Embedded static frontend, collection creation, mode/timing settings, recording/history/inspection, text edit, restore, comparison, and SQLite export/import |

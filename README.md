@@ -1,6 +1,6 @@
 # Inference Replay Proxy
 
-A standalone Go recorder and replay proxy for Chat Completions, Responses, and Anthropic Messages. SQLite holds named collections and immutable response revisions. A statically exported Next.js control panel, built with shadcn/ui and Tailwind CSS v4, is embedded in the executable. Node is needed to build the frontend, never to run the proxy.
+A standalone Go recorder and replay proxy for Chat Completions, Responses, Anthropic Messages, and decision models (OpenRouter's decisions API). SQLite holds named collections and immutable response revisions. A statically exported Next.js control panel, built with shadcn/ui and Tailwind CSS v4, is embedded in the executable. Node is needed to build the frontend, never to run the proxy.
 
 ## Build and run
 
@@ -33,6 +33,9 @@ The server exposes:
 | Chat Completions | `/v1/chat/completions` |
 | Responses | `/v1/responses` |
 | Anthropic Messages | `/v1/messages` |
+| Decisions | `/v1/decisions` |
+
+The decisions route speaks the SystemOne wire format OpenRouter serves at `https://openrouter.ai/api/alpha/decisions`: a JSON request of `model`, `state` (JSON, text, or `image_url` parts) and typed `questions`, answered by one JSON body of `answers` and `usage`. It never streams; `"stream": true` returns 400 `invalid_stream`. Clients that join a base URL and an endpoint path use `http://<proxy>/v1` and `decisions`. Because a decision's probabilities vary from call to call, replaying the recorded answers is what makes a pipeline built on them repeatable.
 
 Upstream URLs are complete endpoints, not base URLs. Caller credentials and headers are not forwarded. Configure credentials through environment variables or a private local JSON file. `api_key_env` names an environment variable; `api_key` supports a literal local-file secret. No credentials are written into recordings or exports. Requests and model outputs themselves may contain sensitive application data.
 
@@ -129,7 +132,7 @@ rate, completion errors, and separate upstream/replay duration and first-SSE-
 event percentiles. Record-mode requests are cache bypasses. Existing history
 from an older database remains untimed rather than being treated as zero.
 
-Matching uses a versioned SHA-256 input containing the API type (Chat Completions, Responses, or Messages) and the canonical JSON request: model, messages, temperature, tools, and every other field. The upstream provider, its URL, and its headers are not part of it. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Two tool-related differences are ignored as well, because clients often produce them nondeterministically. First, the order of the `tools` array. Second, object key order and whitespace inside JSON carried in strings: tool-call arguments and tool results (Responses `function_call` arguments and `function_call_output` output, Chat Completions `tool_calls` arguments and `tool` messages, Messages `tool_result` content). Values in that JSON still have to match exactly, and a string that isn't a JSON object or array is compared verbatim. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
+Matching uses a versioned SHA-256 input containing the API type (Chat Completions, Responses, Messages, or Decisions) and the canonical JSON request: model, messages, temperature, tools, and every other field. The upstream provider, its URL, and its headers are not part of it. Object property order is ignored; array order, string contents, and exact numeric precision are preserved, and an empty array is distinct from `null`. Two tool-related differences are ignored as well, because clients often produce them nondeterministically. First, the order of the `tools` array. Second, object key order and whitespace inside JSON carried in strings: tool-call arguments and tool results (Responses `function_call` arguments and `function_call_output` output, Chat Completions `tool_calls` arguments and `tool` messages, Messages `tool_result` content). Values in that JSON still have to match exactly, and a string that isn't a JSON object or array is compared verbatim. Streaming and non-streaming requests are distinct; `"stream": null` is non-streaming. There is no fuzzy matching.
 
 Attachments (images, files and audio, in user content or inside tool results) are compared by what they are, not how they were sent:
 
@@ -146,7 +149,7 @@ Exact recordings of stateful requests replay normally. Live requests that refere
 
 Traffic analytics show request volume over time, cache hits and misses, recording completions, errors, and separate upstream/replay timing summaries. Collection and date filters aggregate the full persisted history, beyond the latest 200 rows shown in the history browser. Auto-mode forwarded misses count as cache misses; Record mode bypasses the cache. Legacy requests without timing measurements are excluded from latency statistics. The dashboard refreshes every five seconds without replacing editor drafts.
 
-The control panel provides collection management, request history and hit/miss outcomes, request comparison, response inspection, revision history, and restore. Its protocol-aware response browser reconstructs assistant text, tool calls and results, reasoning, refusal, usage, annotations, and event timing, with expandable fields and the exact raw body or SSE frames always available. Ordinary textual assistant answers support plain-text editing. Tool calls, reasoning, and multimodal content require the advanced response/SSE editor, with the reason displayed in the panel.
+The control panel provides collection management, request history and hit/miss outcomes, request comparison, response inspection, revision history, and restore. Its protocol-aware response browser reconstructs assistant text, tool calls and results, reasoning, refusal, usage, annotations, and event timing, with expandable fields and the exact raw body or SSE frames always available. Ordinary textual assistant answers support plain-text editing. Tool calls, reasoning, multimodal content, and decision answers require the advanced response/SSE editor, with the reason displayed in the panel. Decision requests show their questions and state (including images), and decision responses show one entry per answer.
 
 Edits are validated before becoming new revisions. Stream structure, completion, and text/final-output agreement are checked. Restoring activates a saved immutable revision without deleting history. Usage remains historical metadata from the original provider response; editing never estimates token counts.
 

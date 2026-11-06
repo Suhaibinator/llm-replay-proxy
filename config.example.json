@@ -25,6 +25,10 @@
         "/v1/chat/completions": {
           "url": "https://openrouter.ai/api/v1/chat/completions",
           "api_key_env": "OPENROUTER_API_KEY"
+        },
+        "/v1/decisions": {
+          "url": "https://openrouter.ai/api/alpha/decisions",
+          "api_key_env": "OPENROUTER_API_KEY"
         }
       }
     }

@@ -26,6 +26,7 @@ func TestKeyCanonicalAndSensitiveInputs(t *testing.T) {
 	for _, change := range []struct{ route, body string }{
 		{"/v1/responses", string(bodyA)},
 		{"/v1/messages", string(bodyA)},
+		{"/v1/decisions", string(bodyA)},
 		{"/v1/chat/completions", strings.Replace(string(bodyA), `"stream":true`, `"stream":false`, 1)},
 		{"/v1/chat/completions", strings.Replace(string(bodyA), `"model":"m"`, `"model":"other"`, 1)},
 	} {

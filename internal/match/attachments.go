@@ -31,6 +31,7 @@ var conversationFields = map[string][]string{
 	"chat_completions": {"messages"},
 	"responses":        {"input"},
 	"messages":         {"messages", "system"},
+	"decisions":        {"state"},
 }
 
 func normalizeAttachments(api string, request map[string]any) {

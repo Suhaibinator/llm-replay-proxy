@@ -122,7 +122,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func validRoute(route string) bool {
 	switch route {
-	case "/v1/chat/completions", "/v1/responses", "/v1/messages":
+	case protocol.ChatRoute, protocol.ResponsesRoute, protocol.MessagesRoute, protocol.DecisionsRoute:
 		return true
 	default:
 		return false
@@ -158,6 +158,10 @@ func (h *handler) serveInference(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "invalid_stream", "stream must be a boolean")
 			return
 		}
+	}
+	if streaming && !protocol.Streams(r.URL.Path) {
+		writeError(w, 400, "invalid_stream", "the decisions API does not stream")
+		return
 	}
 
 	provider, upstream, ok := h.selectProvider(w, r)
@@ -593,6 +597,10 @@ func (h *handler) forward(w http.ResponseWriter, r *http.Request, original, cano
 		return
 	}
 	if err := protocol.Validate(r.URL.Path, streaming, revision); err != nil {
+		history("incomplete", withRetries(err.Error(), retried), 0, 0)
+		return
+	}
+	if err := protocol.ValidateForRequest(r.URL.Path, original, revision); err != nil {
 		history("incomplete", withRetries(err.Error(), retried), 0, 0)
 		return
 	}
