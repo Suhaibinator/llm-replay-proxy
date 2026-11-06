@@ -45,7 +45,7 @@ type Config struct {
 }
 
 // Routes lists the inference routes a provider may configure.
-var Routes = []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"}
+var Routes = []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/decisions"}
 
 // providerName is the provider-name grammar. Names travel in a request header
 // and in history, so they stay short and unambiguous.

@@ -29,6 +29,8 @@ func API(route string) (string, error) {
 		return "responses", nil
 	case "/v1/messages":
 		return "messages", nil
+	case "/v1/decisions":
+		return "decisions", nil
 	default:
 		return "", fmt.Errorf("match: unsupported route %q", route)
 	}

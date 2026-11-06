@@ -446,3 +446,24 @@ test("output speed counts from the first data frame, skipping keep-alives", () =
   assert.equal(outputSpeed(events, parseExactJSON('{"input_tokens":5}')), null);
   assert.equal(outputSpeed(events.slice(0, 1), parseExactJSON('{"output_tokens":1}')), null);
 });
+test("Decisions responses show one block per answer and keep usage", () => {
+  const view = responseView(
+    "/v1/decisions",
+    false,
+    rev(
+      '{"id":"gen-1","model":"pplx-decider-v1.2","answers":{"page_kind":{"type":"choice","choice":"assignment","confidence":0.9645848383112524},"presence_2":{"type":"noul","noul":0.87}},"usage":{"input_tokens":1834,"output_tokens":3}}',
+    ),
+  );
+  assert.equal(view.protocol, "Decisions");
+  assert.deepEqual(
+    view.blocks.map((b) => [b.kind, b.title]),
+    [
+      ["other", "page_kind · choice"],
+      ["other", "presence_2 · noul"],
+    ],
+  );
+  assert.equal(view.blocks[0].raw.confidence.source, "0.9645848383112524");
+  assert.ok(!("answers" in view.metadata));
+  assert.equal(view.metadata.model, "pplx-decider-v1.2");
+  assert.deepEqual(view.warnings, []);
+});

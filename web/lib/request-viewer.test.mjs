@@ -243,3 +243,21 @@ test("Tool output that is JSON text opens as fields; other text stays text", () 
   assert.equal(json.value.city, "Paris");
   assert.equal(text.kind, "text");
 });
+test("Decisions requests show questions and the state with its image", () => {
+  const view = requestView(
+    "/v1/decisions",
+    '{"model":"perplexity/pplx-decider-v1.2","state":[{"submission_page":3},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}],"questions":{"page_kind":{"type":"choice","instructions":"What is this page?"},"presence_2":{"type":"noul"}}}',
+  );
+  assert.equal(view.protocol, "Decisions");
+  assert.equal(view.model, "perplexity/pplx-decider-v1.2");
+  assert.deepEqual(
+    view.turns.map((t) => [t.role, t.name, t.parts.map((p) => p.kind)]),
+    [
+      ["instructions", "questions", ["data", "data"]],
+      ["user", "state", ["data", "image"]],
+    ],
+  );
+  assert.equal(view.turns[0].parts[0].title, "page_kind · choice");
+  assert.equal(view.counts.images, 1);
+  assert.deepEqual(Object.keys(view.parameters), ["model"]);
+});

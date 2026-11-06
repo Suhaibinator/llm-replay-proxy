@@ -16,6 +16,7 @@ const (
 	ChatRoute      = "/v1/chat/completions"
 	ResponsesRoute = "/v1/responses"
 	MessagesRoute  = "/v1/messages"
+	DecisionsRoute = "/v1/decisions"
 )
 
 // Validate rejects failed, malformed, and incomplete recordings. For SSE it
@@ -274,6 +275,8 @@ func inspect(route string, streaming bool, rev model.Revision, classify bool) (s
 		return inspectResponses(streaming, rev, classify)
 	case MessagesRoute:
 		return inspectMessages(streaming, rev, classify)
+	case DecisionsRoute:
+		return inspectDecisions(streaming, rev)
 	default:
 		return "", "", fmt.Errorf("unsupported API route %q", route)
 	}

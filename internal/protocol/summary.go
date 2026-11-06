@@ -22,6 +22,10 @@ func SummarizeRequest(route string, body []byte) model.RequestSummary {
 		return s
 	}
 	s.Model, _ = req["model"].(string)
+	if route == DecisionsRoute {
+		summarizeDecisionsRequest(&s, req)
+		return s
+	}
 	var items []any
 	opening := []any{route}
 	switch route {

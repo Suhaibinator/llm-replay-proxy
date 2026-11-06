@@ -18,7 +18,8 @@ recomputes older ones.
   first user-written text, bounded like `preview`. `summaryVersion` is bumped
   so stored summaries are recomputed.
 - **Response summary** (`ResponseSummary`), one per revision, from its JSON
-  body or SSE frames, for all three protocols:
+  body or SSE frames, for all three conversational protocols (decisions are
+  summarized as described in `contracts.md`):
   - `model`: the response's model field; empty if absent.
   - `outcome`: Responses `status` (`completed`, `incomplete`, `failed`, …);
     Chat `finish_reason` of the first choice; Messages `stop_reason`.

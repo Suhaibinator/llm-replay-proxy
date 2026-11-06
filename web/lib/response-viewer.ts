@@ -513,11 +513,13 @@ export function responseView(
   streaming: boolean,
   revision: ResponseRevision,
 ): ResponseView {
-  const protocol = route.endsWith("/messages")
-    ? "Anthropic Messages"
-    : route.endsWith("/responses")
-      ? "Responses"
-      : "Chat Completions";
+  const protocol = route.endsWith("/decisions")
+    ? "Decisions"
+    : route.endsWith("/messages")
+      ? "Anthropic Messages"
+      : route.endsWith("/responses")
+        ? "Responses"
+        : "Chat Completions";
   const frames = streaming ? parseEvents(revision.events || []) : [];
   const view: ResponseView = {
     protocol,
@@ -546,12 +548,29 @@ export function responseView(
     view.metadata = Object.fromEntries(
       Object.entries(response).filter(
         ([key]) =>
-          !["choices", "output", "content", "output_text", "usage"].includes(
-            key,
-          ),
+          ![
+            "choices",
+            "output",
+            "content",
+            "output_text",
+            "usage",
+            ...(protocol === "Decisions" ? ["answers"] : []),
+          ].includes(key),
       ),
     );
-    if (protocol === "Chat Completions") view.blocks = chatBlocks(response);
+    if (protocol === "Decisions")
+      view.blocks = Object.entries(object(response.answers)).map(
+        ([id, raw]): ResponseBlock => {
+          const type = str(object(raw).type);
+          return {
+            kind: "other",
+            title: type ? `${id} · ${type}` : id,
+            raw,
+          };
+        },
+      );
+    else if (protocol === "Chat Completions")
+      view.blocks = chatBlocks(response);
     else if (protocol === "Anthropic Messages")
       view.blocks = contentBlocks(response.content);
     else

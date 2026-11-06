@@ -13,7 +13,7 @@ import (
 // SummarizeResponse describes a stored response for lists and analytics: the
 // model, outcome, token usage and cost as the provider reported them, and
 // how much text, reasoning and how many tool calls it produced. It reads JSON
-// bodies and SSE frames of all three protocols, tolerates anything it does not
+// bodies and SSE frames of every protocol, tolerates anything it does not
 // recognise (those fields stay empty or nil) and never fails.
 func SummarizeResponse(route string, streaming bool, rev model.Revision) model.ResponseSummary {
 	var s model.ResponseSummary
@@ -29,6 +29,8 @@ func SummarizeResponse(route string, streaming bool, rev model.Revision) model.R
 			summarizeResponseObject(&s, o)
 		case MessagesRoute:
 			summarizeMessageBody(&s, o)
+		case DecisionsRoute:
+			summarizeDecisionsBody(&s, o)
 		}
 		return s
 	}

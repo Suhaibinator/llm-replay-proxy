@@ -127,7 +127,7 @@ the first frame only.
 
 The plain-text editor only rewrites existing text; it never inserts events or
 adjusts metadata. A recording therefore reports an unavailability reason, and
-needs an advanced edit, when it contains tool calls, reasoning, refusals, audio,
+needs an advanced edit, when it is a decision response, or when it contains tool calls, reasoning, refusals, audio,
 multiple choices/parts/blocks, non-empty annotations, citations, or logprobs
 (including any `*.annotation.added` Responses event), or a Responses stream
 with no `response.output_text.delta` event to rewrite.
@@ -137,7 +137,7 @@ with no `response.output_text.delta` event to rewrite.
 Empty JSON arrays are matched as `[]`, distinct from `null`; an array emptied by
 exclusions also matches as `[]`. The key is the SHA-256 of the matching input
 `{"version":4,"api":…,"body":…}`, where `api` is `chat_completions`,
-`responses` or `messages` and `body` is the canonical request after collection
+`responses`, `messages` or `decisions` and `body` is the canonical request after collection
 exclusions. Canonical JSON is RFC 8785 (JCS) via `encoding/json/jsontext`:
 sorted member names, minimal string escapes and no whitespace. Numbers are the
 one exception: they keep their exact lexeme rather than being rounded through
@@ -147,9 +147,9 @@ sorted by each tool's canonical JSON, and JSON objects or arrays embedded in
 tool-call argument and tool-result strings are re-encoded canonically (sorted
 keys, no whitespace, exact numbers), still as strings. Attachment slots in the
 conversation (Chat Completions `messages`, Responses `input`, Messages
-`messages` and `system`), found at any depth by their part's `type`, are
+`messages` and `system`, Decisions `state`), found at any depth by their part's `type`, are
 normalized too: `image_url.url`, `file.file_data` and `input_audio.data`
-(Chat Completions); `input_image.image_url`, `input_file.file_url` and
+(Chat Completions, and `image_url.url` in Decisions `state`); `input_image.image_url`, `input_file.file_url` and
 `input_file.file_data` (Responses); and `image`/`document` `source.url` and
 `source.data` for `url` and `base64` sources (Messages). In those slots, an
 http(s) URL loses the signing parameters of a recognised scheme (AWS SigV4
@@ -170,3 +170,31 @@ snapshot validation happen outside publication transactions.
 
 KMS bootstrap settings, identity tokens, binding keys, upstream credentials, and
 the JWT signing key are not part of this control API. See [KMS configuration](kms.md).
+
+## Decisions
+
+`/v1/decisions` records the SystemOne decisions API (OpenRouter
+`/api/alpha/decisions`). Requests are `{"model", "state", "questions"}`; the
+whole body is part of the key, with `state` image parts normalized like other
+attachments. Canonical JSON sorts object members, so two requests that differ
+only in the order of `questions` (or of a choice question's `criteria`) share a
+recording. Requests with `"stream": true` are rejected with 400
+`invalid_stream`; there is no streamed form.
+
+A response is published only when it is a JSON object with no `error` member,
+a nonempty string `model`, a nonempty `answers` object whose every value is an
+object with a nonempty string `type`, and a `usage` object with numeric
+`input_tokens` and `output_tokens`. Answer contents (`noul`, `choice`,
+`confidence`, `probabilities`, …) are not checked: they depend on the question
+type, and the client validates them. Before publishing, the proxy also checks
+the response against its request: every question must have an answer whose
+`type` is the question's `type`, since a client rejects anything less and a
+recorded partial answer would fail on every replay. Usage counts must be
+nonnegative integers. Any other response is delivered to the caller and never
+recorded. Decision recordings have no plain-text editor.
+
+Request summaries report `model`, the number of questions as `items`, the
+images in `state`, and the sorted question ids as `preview`; decisions have no
+`opening` or `thread`. Response summaries report `model`, `usage.input` and
+`usage.output` from `input_tokens` and `output_tokens`, and `cost` from
+`usage.cost`; `outcome` is empty.

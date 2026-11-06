@@ -96,6 +96,9 @@ func TestInlineAttachmentsMatchByContent(t *testing.T) {
 		{"messages base64 source", "/v1/messages", `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]}]}`,
 			`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + wrapped.String() + `"}}]}]}`,
 			`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + other + `"}}]}]}`},
+		{"decisions state image", "/v1/decisions", `{"model":"d","state":[{"page":1},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + b64 + `"}}],"questions":{"q":{"type":"noul"}}}`,
+			`{"model":"d","state":[{"page":1},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + wrapped.String() + `"}}],"questions":{"q":{"type":"noul"}}}`,
+			`{"model":"d","state":[{"page":1},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + other + `"}}],"questions":{"q":{"type":"noul"}}}`},
 	} {
 		key := mustKey(t, tc.route, tc.body)
 		if tc.sameAs != "" && mustKey(t, tc.route, tc.sameAs) != key {

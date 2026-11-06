@@ -308,6 +308,7 @@ func TestRecordThenReplayAllProtocolsAndTransports(t *testing.T) {
 		{"chat body", "/v1/chat/completions", `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`, false},
 		{"responses body", "/v1/responses", `{"id":"r1","status":"completed","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}`, false},
 		{"messages body", "/v1/messages", `{"id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`, false},
+		{"decisions body", "/v1/decisions", `{"id":"d1","model":"pplx-decider-v1.2","answers":{"urgent":{"type":"noul","noul":0.12}},"usage":{"input_tokens":10,"output_tokens":1}}`, false},
 		{"chat stream", "/v1/chat/completions", "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", true},
 		{"responses stream", "/v1/responses", "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\nevent: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"text\":\"hello\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"id\":\"m1\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}]}}\n\n", true},
 		{"messages stream", "/v1/messages", "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", true},
@@ -325,6 +326,9 @@ func TestRecordThenReplayAllProtocolsAndTransports(t *testing.T) {
 			db := openTestStore(t, "record")
 			h := New(db, Config{Client: client, DefaultProvider: "test", Providers: map[string]map[string]Upstream{"test": {tc.route: {URL: "https://upstream.invalid", APIKey: "secret"}}}})
 			body := `{"model":"demo","stream":` + map[bool]string{true: "true", false: "false"}[tc.stream] + `}`
+			if tc.route == "/v1/decisions" { // a decision is recorded only when it answers what was asked
+				body = `{"model":"demo","stream":false,"state":"s","questions":{"urgent":{"type":"noul"}}}`
+			}
 			first := perform(h, tc.route, body)
 			if first.Code != 200 || first.Body.String() != tc.response {
 				t.Fatalf("record response = %d %q", first.Code, first.Body.String())
